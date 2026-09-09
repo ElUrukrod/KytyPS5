@@ -284,63 +284,67 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 
 static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& runtime,
                                 MaterializedSnapshot& snapshot) {
-	if (!program.resource_tracking_complete) {
-		return false;
-	}
+    if (!program.resource_tracking_complete) {
+       std::fprintf(stderr, "[DEBUG] MaterializeSnapshot FAILED: resource_tracking_complete is false\n");
+       return false;
+    }
 
-	if (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr) {
-		return false;
-	}
-	std::vector<DescriptorValue> values;
-	std::vector<uint32_t>        flattened_srt;
-	if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
-	                            flattened_srt, program.clean_flat_slots)) {
-		return false;
-	}
+    if (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr) {
+       std::fprintf(stderr, "[DEBUG] MaterializeSnapshot FAILED: requires_specialization_memory but runtime.read is null\n");
+       return false;
+    }
+    std::vector<DescriptorValue> values;
+    std::vector<uint32_t>        flattened_srt;
+    if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
+                                flattened_srt, program.clean_flat_slots)) {
+       std::fprintf(stderr, "[DEBUG] MaterializeSnapshot FAILED: EvaluateRuntimeSources returned false\n");
+       return false;
+    }
 
-	auto& next   = snapshot.resources;
-	auto  cursor = values.begin();
-	next.buffers.assign(cursor, cursor + program.info.buffers.size());
-	cursor += program.info.buffers.size();
-	next.flattened_srt = std::move(flattened_srt);
-	next.images.resize(program.info.images.size());
-	for (uint32_t image_index = 0; image_index < program.info.images.size(); image_index++) {
-		const auto& image  = program.info.images[image_index];
-		const auto* source = Source(program, image.source);
-		if (source != nullptr && source->indirect_image.has_value()) {
-			const std::array requests {source->indirect_image->material_source,
-			                           source->indirect_image->heap_source};
-			SrtRuntime       clean_runtime = runtime;
-			clean_runtime.read_memory      = runtime.read_specialization_memory;
-			std::vector<DescriptorValue> tables;
-			if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
-				return false;
-			}
-			const auto&   material = tables[0];
-			const auto&   heap     = tables[1];
-			IndirectImage table;
-			if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
-			                              runtime, table)) {
-				return false;
-			}
-			next.images[image_index] = table.descriptors[table.candidates[0]];
-			if (table.descriptors.size() > 1u) {
-				table.resource = image_index;
-				snapshot.indirect_images.push_back(std::move(table));
-			}
-		} else {
-			auto descriptor = *cursor++;
-			if (!ValidImageDescriptor(descriptor, image.r128)) {
-				descriptor.dwords.fill(0);
-			}
-			next.images[image_index] = descriptor;
-		}
-	}
-	next.samplers.assign(cursor, cursor + program.info.samplers.size());
-	next.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	return true;
+    auto& next   = snapshot.resources;
+    auto  cursor = values.begin();
+    next.buffers.assign(cursor, cursor + program.info.buffers.size());
+    cursor += program.info.buffers.size();
+    next.flattened_srt = std::move(flattened_srt);
+    next.images.resize(program.info.images.size());
+    for (uint32_t image_index = 0; image_index < program.info.images.size(); image_index++) {
+       const auto& image  = program.info.images[image_index];
+       const auto* source = Source(program, image.source);
+       if (source != nullptr && source->indirect_image.has_value()) {
+          const std::array requests {source->indirect_image->material_source,
+                                     source->indirect_image->heap_source};
+          SrtRuntime       clean_runtime = runtime;
+          clean_runtime.read_memory      = runtime.read_specialization_memory;
+          std::vector<DescriptorValue> tables;
+          if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
+             std::fprintf(stderr, "[DEBUG] MaterializeSnapshot FAILED: EvaluateDescriptorSources (image %u)\n", image_index);
+             return false;
+          }
+          const auto&   material = tables[0];
+          const auto&   heap     = tables[1];
+          IndirectImage table;
+          if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
+                                        runtime, table)) {
+             std::fprintf(stderr, "[DEBUG] MaterializeSnapshot FAILED: MaterializeIndirectImage (image %u)\n", image_index);
+             return false;
+          }
+          next.images[image_index] = table.descriptors[table.candidates[0]];
+          if (table.descriptors.size() > 1u) {
+             table.resource = image_index;
+             snapshot.indirect_images.push_back(std::move(table));
+          }
+       } else {
+          auto descriptor = *cursor++;
+          if (!ValidImageDescriptor(descriptor, image.r128)) {
+             descriptor.dwords.fill(0);
+          }
+          next.images[image_index] = descriptor;
+       }
+    }
+    next.samplers.assign(cursor, cursor + program.info.samplers.size());
+    next.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+    return true;
 }
-
 struct SamplerPlan {
 	std::array<uint32_t, ShaderInfo::MaxSamplers> point_sampler {};
 	uint32_t                                      sampler_count = 0;

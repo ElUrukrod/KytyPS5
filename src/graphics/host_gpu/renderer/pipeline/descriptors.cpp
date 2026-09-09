@@ -743,13 +743,24 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		ValidateStorageTexture(resource, descriptor, size.size);
 	}
 
-	const auto pixel_format        = surface_format.vk_format;
+	auto pixel_format        = surface_format.vk_format;
 	const auto storage_view_format = storage && format == Prospero::BufferFormat::k32SInt
 	                                     ? vk::Format::eR32Uint
 	                                     : SrgbStorageViewFormat(pixel_format);
-	const auto view_format         = storage && storage_view_format != vk::Format::eUndefined
+	auto view_format         = storage && storage_view_format != vk::Format::eUndefined
 	                                     ? storage_view_format
 	                                     : pixel_format;
+
+	if (resource.depth_compare) {
+		if (pixel_format == vk::Format::eR16Unorm || pixel_format == vk::Format::eR16Uint) {
+			pixel_format = vk::Format::eD16Unorm;
+			view_format  = vk::Format::eD16Unorm;
+		} else if (pixel_format == vk::Format::eR32Sfloat || pixel_format == vk::Format::eR32Uint) {
+			pixel_format = vk::Format::eD32Sfloat;
+			view_format  = vk::Format::eD32Sfloat;
+		}
+	}
+
 	const auto block_bytes         = Prospero::BlockCompressedBytesPerBlock(format);
 	TextureCache::ImageDesc desc {};
 	desc.info.data         = {address, size.size};
@@ -771,6 +782,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, shader_conversion, storage,
 	                                 view_levels, desc.info.resources.layers);
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
+
+	desc.depth_compare = resource.depth_compare;
 
 	auto       id                  = texture_cache.FindImage(desc, shader_conversion);
 	auto*      image               = &texture_cache.GetImage(id);

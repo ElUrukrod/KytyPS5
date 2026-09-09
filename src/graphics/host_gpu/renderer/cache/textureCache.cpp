@@ -935,6 +935,10 @@ void TextureCache::UploadImage(Image& image, const ImageDesc& desc, Buffer& sour
 	const auto  upload = [&](std::vector<vk::BufferImageCopy>& copies, TileManager::Result linear) {
 		for (auto& copy: copies) {
 			copy.bufferOffset += linear.offset;
+
+			if (info.IsDepth()) {
+				copy.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eDepth;
+			}
 		}
 		image.Upload(copies, linear.buffer, linear.offset, linear.size);
 	};
@@ -1263,6 +1267,19 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 			break;
 		default: EXIT("TextureCache: invalid texture binding\n");
 	}
+
+	auto view_info = desc.view_info;
+
+	if (image.info.IsDepth()) {
+		if (view_info.format == vk::Format::eR16Unorm || view_info.format == vk::Format::eR16Uint) {
+			view_info.format = vk::Format::eD16Unorm;
+			view_info.aspect = vk::ImageAspectFlagBits::eDepth;
+		} else if (view_info.format == vk::Format::eR32Sfloat || view_info.format == vk::Format::eR32Uint) {
+			view_info.format = vk::Format::eD32Sfloat;
+			view_info.aspect = vk::ImageAspectFlagBits::eDepth;
+		}
+	}
+
 	const auto view = image.FindView(desc.view_info);
 	NameImageBinding(m_graphics, image, view, desc.type, desc.view_info);
 	return view;

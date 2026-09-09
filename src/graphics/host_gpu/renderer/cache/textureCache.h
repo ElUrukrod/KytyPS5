@@ -35,6 +35,7 @@ public:
 		ImageInfo     info;
 		ImageViewInfo view_info;
 		BindingType   type = BindingType::Texture;
+		bool          depth_compare = false;
 	};
 
 	struct RegionInfo {

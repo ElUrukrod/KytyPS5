@@ -96,50 +96,71 @@ void EmitReturn(ValueEmitContext& ctx) {
 
 void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block,
                               const IR::BlockInfo& info) {
-	const auto& term       = info.terminator;
-	const auto  emit_merge = [&]() {
-		if (term.loop_header) {
-			const auto* merge = TargetBlock(ctx.program, term.merge_block);
-			const auto* cont  = TargetBlock(ctx.program, term.continue_block);
-			if (merge != nullptr && cont != nullptr) {
-				ctx.state.builder.AddFunction(
-				    {OpLoopMerge, ctx.Label(merge), ctx.Label(cont), LoopControlNone});
-			}
-		} else if (term.kind == CFG::TerminatorKind::ConditionalBranch &&
-		           term.merge_block != UINT32_MAX) {
-			if (const auto* merge = TargetBlock(ctx.program, term.merge_block); merge != nullptr) {
-				ctx.state.builder.AddFunction(
-				    {OpSelectionMerge, ctx.Label(merge), SelectionControlNone});
-			}
-		}
-	};
+    const auto& term = info.terminator;
 
-	switch (term.kind) {
-		case CFG::TerminatorKind::Branch: {
-			const auto* target = TargetBlock(ctx.program, term.true_block);
-			if (target == nullptr) {
-				EmitReturn(ctx);
-				return;
-			}
-			emit_merge();
-			ctx.state.builder.AddFunction({OpBranch, ctx.Label(target)});
-			return;
-		}
-		case CFG::TerminatorKind::ConditionalBranch: {
-			const auto* true_block  = TargetBlock(ctx.program, term.true_block);
-			const auto* false_block = TargetBlock(ctx.program, term.false_block);
-			if (true_block == nullptr || false_block == nullptr || info.condition.IsEmpty()) {
-				EmitReturn(ctx);
-				return;
-			}
-			const auto condition = ctx.Def(info.condition);
-			emit_merge();
-			ctx.state.builder.AddFunction(
-			    {OpBranchConditional, condition, ctx.Label(true_block), ctx.Label(false_block)});
-			return;
-		}
-		default: EmitReturn(ctx); return;
-	}
+    switch (term.kind) {
+       case CFG::TerminatorKind::Branch: {
+          const auto* target = TargetBlock(ctx.program, term.true_block);
+          if (target == nullptr) {
+             EmitReturn(ctx);
+             return;
+          }
+          if (term.loop_header) {
+             const auto* merge = TargetBlock(ctx.program, term.merge_block);
+             const auto* cont  = TargetBlock(ctx.program, term.continue_block);
+             if (merge != nullptr && cont != nullptr) {
+                ctx.state.builder.AddFunction(
+                   {OpLoopMerge, ctx.Label(merge), ctx.Label(cont), LoopControlNone});
+             }
+          }
+          ctx.state.builder.AddFunction({OpBranch, ctx.Label(target)});
+          return;
+       }
+       case CFG::TerminatorKind::ConditionalBranch: {
+          const auto* true_block  = TargetBlock(ctx.program, term.true_block);
+          const auto* false_block = TargetBlock(ctx.program, term.false_block);
+          if (true_block == nullptr || false_block == nullptr || info.condition.IsEmpty()) {
+             EmitReturn(ctx);
+             return;
+          }
+          const auto condition = ctx.Def(info.condition);
+
+          if (term.loop_header) {
+             // C'est une condition qui gère l'en-tête d'une boucle (ex: while)
+             const auto* merge = TargetBlock(ctx.program, term.merge_block);
+             const auto* cont  = TargetBlock(ctx.program, term.continue_block);
+             if (merge != nullptr && cont != nullptr) {
+                ctx.state.builder.AddFunction(
+                   {OpLoopMerge, ctx.Label(merge), ctx.Label(cont), LoopControlNone});
+             }
+          } else if (term.merge_block != UINT32_MAX) {
+             // Condition classique avec point de fusion connu
+             const auto* merge = TargetBlock(ctx.program, term.merge_block);
+             if (merge != nullptr) {
+                ctx.state.builder.AddFunction(
+                   {OpSelectionMerge, ctx.Label(merge), SelectionControlNone});
+             }
+          } else {
+          	// --- VULKAN FIX: IRREDUCIBLE CONTROL FLOW ---
+             // Fallback for complex branching: Create a dummy merge block to satisfy SPIR-V structured control flow requirements.
+             const uint32_t dummy_merge = ctx.state.builder.AllocateId();
+             ctx.state.builder.AddFunction({OpSelectionMerge, dummy_merge, SelectionControlNone});
+             ctx.state.builder.AddFunction({OpBranchConditional, condition, ctx.Label(true_block), ctx.Label(false_block)});
+
+          	// Define the unreachable dummy merge block
+             ctx.state.builder.AddFunction({OpLabel, dummy_merge});
+          	 EmitReturn(ctx);
+
+             return; // Return immediately since the branch is already emitted
+          }
+
+       	// Standard emission
+          ctx.state.builder.AddFunction(
+              {OpBranchConditional, condition, ctx.Label(true_block), ctx.Label(false_block)});
+          return;
+       }
+       default: EmitReturn(ctx); return;
+    }
 }
 
 void EmitDispatcherTarget(ValueEmitContext& ctx, const DispatcherFunctionState& dispatcher,
@@ -199,9 +220,9 @@ uint32_t EmitDispatcherNextPc(ValueEmitContext& ctx, const DispatcherFunctionSta
 
 void EmitDirectInstruction(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (EmitValueFlow(ctx, inst) || EmitValueAlu(ctx, inst) || EmitValueMemory(ctx, inst) ||
-	    EmitValueImage(ctx, inst)) {
+		EmitValueImage(ctx, inst) || EmitValueBvh(ctx, inst)) {
 		return;
-	}
+		}
 	ctx.Fail(inst, "has no direct SPIR-V emitter");
 }
 

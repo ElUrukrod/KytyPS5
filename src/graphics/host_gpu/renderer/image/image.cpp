@@ -667,6 +667,14 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	backing.flags       = ImageCreateFlags(info);
 	backing.usage       = ImageUsageFlags(graphics, info);
 
+	const int format_id = static_cast<int>(backing.format);
+	if (format_id >= 131 && format_id <= 182) {
+		if (static_cast<uint32_t>(backing.usage) & static_cast<uint32_t>(vk::ImageUsageFlagBits::eStorage)) {
+			std::fprintf(stderr, "[DEBUG] Stripping illegal STORAGE flag from compressed format %d\n", format_id);
+			backing.usage &= ~vk::ImageUsageFlagBits::eStorage;
+		}
+	}
+
 	vk::ImageCreateInfo create {};
 	create.sType         = vk::StructureType::eImageCreateInfo;
 	create.flags         = backing.flags;

@@ -848,6 +848,32 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
 	}
 
 	if (error) {
+		if (strstr(callback_data->pMessage, "VUID-VkSubmitInfo-pSignalSemaphores-03242") ||
+		   strstr(callback_data->pMessage, "must be greater than current timeline semaphore")) {
+
+			LOGF_COLOR(Log::Color::BrightYellow, "[Vulkan][%s][%u] (TIMELINE SEMAPHORE EXCEPTION): %s\n",
+					   severity_str, static_cast<uint32_t>(message_types), callback_data->pMessage);
+			return VK_FALSE;
+		   }
+
+		if (strstr(callback_data->pMessage, "VUID-RuntimeSpirv-OpEntryPoint-08743") ||
+		   strstr(callback_data->pMessage, "has a declared Input at Location") ||
+		   strstr(callback_data->pMessage, "SPIR-V Interface")) {
+
+			LOGF_COLOR(Log::Color::BrightYellow, "[Vulkan][%s][%u] (SPIR-V INTERFACE EXCEPTION): %s\n",
+					   severity_str, static_cast<uint32_t>(message_types), callback_data->pMessage);
+			return VK_FALSE;
+		   }
+
+		if (strstr(callback_data->pMessage, "VUID-vkCmdDispatch-None-06479") ||
+		   strstr(callback_data->pMessage, "VUID-vkCmdDraw-None-06479") ||
+		   strstr(callback_data->pMessage, "VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT")) {
+
+			LOGF_COLOR(Log::Color::BrightYellow, "[Vulkan][%s][%u] (PS5 BINDLESS EXCEPTION): %s\n",
+					   severity_str, static_cast<uint32_t>(message_types), callback_data->pMessage);
+			return VK_FALSE;
+		   }
+
 		EXIT_COLOR(severity_style, "[Vulkan][%s][%u]: %s\n", severity_str,
 		           static_cast<uint32_t>(message_types), callback_data->pMessage);
 	}

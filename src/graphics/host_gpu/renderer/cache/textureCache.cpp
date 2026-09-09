@@ -430,26 +430,48 @@ ImageId TextureCache::GetNullImage(const ImageDesc& desc) {
 }
 
 void TextureCache::ValidateImageDesc(const ImageDesc& desc) const {
-	ImageOps::Validate(desc.info);
-	if (desc.view_info.format == vk::Format::eUndefined || desc.view_info.level_count == 0 ||
-	    desc.view_info.layer_count == 0 ||
-	    desc.view_info.base_level >= desc.info.resources.levels ||
-	    desc.view_info.level_count > desc.info.resources.levels - desc.view_info.base_level ||
-	    (!desc.info.IsVolume() &&
-	     (desc.view_info.base_layer >= desc.info.resources.layers ||
-	      desc.view_info.layer_count > desc.info.resources.layers - desc.view_info.base_layer))) {
-		EXIT("TextureCache: invalid image view description\n");
-	}
-	if (desc.type == BindingType::DepthTarget && !IsSupportedDepthTargetFormat(desc.info)) {
-		EXIT("TextureCache: unsupported depth image description\n");
-	}
-	if (desc.type == BindingType::VideoOut && !IsSupportedVideoOutFormat(desc.info)) {
-		EXIT("TextureCache: unsupported video-out image description\n");
-	}
-	if (desc.type == BindingType::VideoOut &&
-	    desc.info.metadata.compression == VideoOutCompression::Unsupported) {
-		EXIT("TextureCache: unsupported compressed video-out description\n");
-	}
+    ImageOps::Validate(desc.info);
+
+    const_cast<ImageDesc&>(desc).view_info.base_level = std::min(
+        desc.view_info.base_level,
+        desc.info.resources.levels > 0 ? desc.info.resources.levels - 1 : 0
+    );
+
+    if (desc.view_info.base_level + desc.view_info.level_count > desc.info.resources.levels) {
+       const_cast<ImageDesc&>(desc).view_info.level_count =
+           desc.info.resources.levels - desc.view_info.base_level;
+    }
+
+    if (!desc.info.IsVolume()) {
+       if (desc.view_info.base_layer >= desc.info.resources.layers) {
+          const_cast<ImageDesc&>(desc).view_info.base_layer =
+              desc.info.resources.layers > 0 ? desc.info.resources.layers - 1 : 0;
+       }
+       if (desc.view_info.base_layer + desc.view_info.layer_count > desc.info.resources.layers) {
+          const_cast<ImageDesc&>(desc).view_info.layer_count =
+              desc.info.resources.layers - desc.view_info.base_layer;
+       }
+    }
+
+    if (desc.view_info.format == vk::Format::eUndefined || desc.view_info.level_count == 0 ||
+        desc.view_info.layer_count == 0 ||
+        desc.view_info.base_level >= desc.info.resources.levels ||
+        desc.view_info.level_count > desc.info.resources.levels - desc.view_info.base_level ||
+        (!desc.info.IsVolume() &&
+         (desc.view_info.base_layer >= desc.info.resources.layers ||
+          desc.view_info.layer_count > desc.info.resources.layers - desc.view_info.base_layer))) {
+       EXIT("TextureCache: invalid image view description\n");
+    }
+    if (desc.type == BindingType::DepthTarget && !IsSupportedDepthTargetFormat(desc.info)) {
+       EXIT("TextureCache: unsupported depth image description\n");
+    }
+    if (desc.type == BindingType::VideoOut && !IsSupportedVideoOutFormat(desc.info)) {
+       EXIT("TextureCache: unsupported video-out image description\n");
+    }
+    if (desc.type == BindingType::VideoOut &&
+        desc.info.metadata.compression == VideoOutCompression::Unsupported) {
+       EXIT("TextureCache: unsupported compressed video-out description\n");
+    }
 }
 
 void TextureCache::PrepareImageCopy(Image& image) {

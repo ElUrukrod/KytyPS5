@@ -466,6 +466,11 @@ static bool IsSupportedStorageTextureEncoding(const ShaderRecompiler::IR::ImageR
 
 void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
                             const ShaderTextureResource& descriptor, uint64_t size) {
+
+	if (descriptor.BaseLevel() > descriptor.MaxMip()) {
+		return;
+	}
+	
 	const auto format        = descriptor.Format();
 	const bool resource_ok   = IsSupportedStorageImageResource(resource);
 	const bool descriptor_ok = IsSupportedStorageTextureDescriptor(resource, descriptor);
@@ -512,18 +517,18 @@ struct NullImageSpec {
 	Prospero::BufferFormat guest_format;
 };
 
-static NullImageSpec NullTextureSpec(const ShaderRecompiler::IR::ImageResource& resource) {
-	switch (resource.numeric_class) {
+	static NullImageSpec NullTextureSpec(const ShaderRecompiler::IR::ImageResource& resource) {
+		switch (resource.numeric_class) {
 		case Prospero::TextureNumericClass::Float:
-			return {vk::Format::eR32Sfloat, Prospero::BufferFormat::k32Float};
+			return {vk::Format::eR32G32B32A32Sfloat, Prospero::BufferFormat::k32Float};
 		case Prospero::TextureNumericClass::Uint:
-			return {vk::Format::eR32Uint, Prospero::BufferFormat::k32UInt};
+			return {vk::Format::eR32G32B32A32Uint, Prospero::BufferFormat::k32UInt};
 		case Prospero::TextureNumericClass::Sint:
-			return {vk::Format::eR32Sint, Prospero::BufferFormat::k32SInt};
+			return {vk::Format::eR32G32B32A32Sint, Prospero::BufferFormat::k32SInt};
 		case Prospero::TextureNumericClass::Unsupported: break;
+		}
+		EXIT("null image has unsupported numeric class\n");
 	}
-	EXIT("null image has unsupported numeric class\n");
-}
 
 static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::ImageResource& resource,
                                                TextureCache::BindingType                  binding) {
@@ -534,7 +539,7 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 	desc.info.type            = Prospero::ImageType::kColor2D;
 	desc.info.extent          = {1, 1, 1};
 	desc.info.resources       = {1, 1};
-	desc.info.bytes_per_block = 4;
+	desc.info.bytes_per_block = 16;
 	desc.info.samples         = 1;
 	desc.info.mip_layout[0]   = {0, 0, 1, 1};
 	desc.view_info.format     = desc.info.pixel_format;
@@ -652,37 +657,50 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value) {
-	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
-	const bool storage = resource.written;
-	if (storage) {
-		ValidateStorageImageResource(resource);
-	}
+    auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
+    const bool storage = resource.written;
+    if (storage) {
+       ValidateStorageImageResource(resource);
+    }
 
-	auto& texture_cache = m_context.GetTextureCache();
-	if (descriptor.IsNull()) {
-		auto       desc = NullTextureDesc(resource, storage ? TextureCache::BindingType::Storage
-		                                                    : TextureCache::BindingType::Texture);
-		const auto id   = texture_cache.FindImage(desc);
-		return {id, nullptr, std::move(desc)};
-	}
+    auto& texture_cache = m_context.GetTextureCache();
+    if (descriptor.IsNull()) {
+       auto       desc = NullTextureDesc(resource, storage ? TextureCache::BindingType::Storage
+                                                           : TextureCache::BindingType::Texture);
+       const auto id   = texture_cache.FindImage(desc);
+       return {id, nullptr, std::move(desc)};
+    }
 
-	const auto address      = descriptor.Base40();
-	const auto width        = static_cast<uint32_t>(descriptor.Width5()) + 1u;
-	const auto height       = static_cast<uint32_t>(descriptor.Height5()) + 1u;
-	const auto base_level   = descriptor.BaseLevel();
-	const auto last_level   = descriptor.LastLevel();
-	const auto type         = TextureType(descriptor);
-	const bool multisampled = IsMultisampledTexture(type);
-	const auto max_mip      = resource.r128 ? last_level : descriptor.MaxMip();
-	const auto levels       = multisampled ? 1u : static_cast<uint32_t>(max_mip) + 1u;
-	const bool dynamic_storage =
-	    storage && resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::DynamicStorage;
-	const auto view_last_level =
-	    !multisampled && !dynamic_storage ? std::min(last_level, max_mip) : last_level;
-	const auto tile       = descriptor.TileMode();
-	const bool depth_tile = tile == Prospero::TileMode::kDepth;
-	const bool msaa_tile  = depth_tile || tile == Prospero::TileMode::kRenderTarget;
-	const bool msaa_array = type == Prospero::ImageType::kColor2DMsaaArray;
+    const auto address      = descriptor.Base40();
+    const auto width        = static_cast<uint32_t>(descriptor.Width5()) + 1u;
+    const auto height       = static_cast<uint32_t>(descriptor.Height5()) + 1u;
+
+    // --- CORRECTION PROPRE : CLAMPING DES NIVEAUX ---
+    const auto type         = TextureType(descriptor);
+    const bool multisampled = IsMultisampledTexture(type);
+    const auto max_mip      = resource.r128 ? descriptor.LastLevel() : descriptor.MaxMip();
+    const auto levels       = multisampled ? 1u : static_cast<uint32_t>(max_mip) + 1u;
+
+    // On bride les niveaux demandés par le jeu pour qu'ils ne dépassent jamais la limite réelle (levels - 1)
+    uint32_t clamped_base   = descriptor.BaseLevel();
+    uint32_t clamped_last   = descriptor.LastLevel();
+    if (levels > 0) {
+       if (clamped_base >= levels) clamped_base = levels - 1u;
+       if (clamped_last >= levels) clamped_last = levels - 1u;
+    }
+
+    const auto base_level   = clamped_base;
+    const auto last_level   = clamped_last;
+    // -----------------------------------------------
+
+    const bool dynamic_storage =
+        storage && resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::DynamicStorage;
+    const auto view_last_level =
+        !multisampled && !dynamic_storage ? std::min(static_cast<uint32_t>(last_level), static_cast<uint32_t>(max_mip)) : last_level;
+    const auto tile       = descriptor.TileMode();
+    const bool depth_tile = tile == Prospero::TileMode::kDepth;
+    const bool msaa_tile  = depth_tile || tile == Prospero::TileMode::kRenderTarget;
+    const bool msaa_array = type == Prospero::ImageType::kColor2DMsaaArray;
 	if ((!multisampled && (base_level > view_last_level || view_last_level >= levels)) ||
 	    (multisampled &&
 	     (base_level != 0 || last_level == 0 || last_level > 3 || max_mip != last_level ||
@@ -758,6 +776,18 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		} else if (pixel_format == vk::Format::eR32Sfloat || pixel_format == vk::Format::eR32Uint) {
 			pixel_format = vk::Format::eD32Sfloat;
 			view_format  = vk::Format::eD32Sfloat;
+		}
+
+		bool is_depth = (pixel_format == vk::Format::eD16Unorm ||
+						 pixel_format == vk::Format::eD32Sfloat ||
+						 pixel_format == vk::Format::eD16UnormS8Uint ||
+						 pixel_format == vk::Format::eD24UnormS8Uint ||
+						 pixel_format == vk::Format::eD32SfloatS8Uint);
+
+		if (!is_depth) {
+			auto desc = NullTextureDesc(resource, TextureCache::BindingType::Texture);
+			const auto null_id = texture_cache.FindImage(desc);
+			return {null_id, nullptr, std::move(desc)};
 		}
 	}
 

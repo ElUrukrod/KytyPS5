@@ -134,16 +134,29 @@ bool IsRuntimeUniformOp(ValueOpcode op) {
 
 class RuntimeValidator {
 public:
-	explicit RuntimeValidator(const ResourcePlan& program, Value active_mask = {})
-	    : m_program(program), m_active_mask(active_mask.Resolve()) {}
+	explicit RuntimeValidator(const ResourcePlan& program, RuntimeValueType type)
+	    : m_program(program), m_type(type) {}
 
 	bool Run(Value value) { return Validate(value); }
 
 private:
-	bool Validate(Value value) {
-		value            = value.Resolve();
+	bool ValidateArguments(const Inst& inst, bool require_uniform) {
+		for (size_t index = 0; index < inst.NumArgs(); index++) {
+			if (!Validate(inst.Arg(index), require_uniform)) return false;
+		}
+		return true;
+	}
+
+	bool Validate(Value value, bool require_uniform = true) {
+		value = value.Resolve();
+		// Host floating-point evaluation does not model shader rounding/denormal modes.
+		if (m_type == RuntimeValueType::Integer &&
+		    TypesOverlap(value.GetType(), Type::F16 | Type::F32 | Type::F32x2)) {
+			return false;
+		}
 		const auto* inst = value.TryInstruction();
 		if (inst == nullptr) {
+			if (!require_uniform) return true;
 			switch (value.GetType()) {
 				case Type::U1:
 				case Type::U8:
@@ -154,16 +167,41 @@ private:
 				default: return false;
 			}
 		}
+		// Integer-only dependency checks do not depend on the active EXEC mask.
+		if (!require_uniform && m_validated_dependencies.contains(inst)) return true;
 		if (!m_visiting.insert(inst).second) {
-			return false;
+			return !require_uniform;
 		}
 		const auto finish = [&](bool valid) {
 			m_visiting.erase(inst);
+			if (valid && !require_uniform) m_validated_dependencies.insert(inst);
 			return valid;
 		};
 		const auto op = inst->GetOpcode();
+		if (op == ValueOpcode::ReadConst) {
+			const auto slot = inst->NumArgs() == 2 ? inst->Arg(1).Resolve() : Value {};
+			if (inst->NumArgs() != 2 || inst->Arg(0).Resolve().TryInstruction() == nullptr ||
+			    inst->Arg(0).Resolve().TryInstruction()->GetOpcode() !=
+			        ValueOpcode::GetSrtResource ||
+			    !slot.IsImmediate() || slot.GetType() != Type::U32 ||
+			    slot.U32() >= m_program.srt_reads.size()) {
+				return finish(false);
+			}
+			if (m_type == RuntimeValueType::Integer) {
+				const auto active_mask = m_active_mask;
+				m_active_mask          = {};
+				const bool valid       = Validate(m_program.srt_reads[slot.U32()].value);
+				m_active_mask          = active_mask;
+				if (!valid) return finish(false);
+			}
+		}
+		if (!require_uniform) return finish(ValidateArguments(*inst, false));
 		if (!m_active_mask.IsEmpty() && IsRuntimeSelect(op) && inst->NumArgs() == 3 &&
 		    inst->Arg(0).Resolve() == m_active_mask) {
+			// Empty EXEC reads lane zero, so ignored operands still require integer types.
+			if (m_type == RuntimeValueType::Integer && !Validate(inst->Arg(2), false)) {
+				return finish(false);
+			}
 			return finish(Validate(inst->Arg(1)));
 		}
 		if (op == ValueOpcode::UndefU1 || op == ValueOpcode::UndefU8 ||
@@ -189,6 +227,9 @@ private:
 			return finish(true);
 		}
 		if (op == ValueOpcode::Phi) {
+			if (m_type == RuntimeValueType::Integer && !ValidateArguments(*inst, false)) {
+				return finish(false);
+			}
 			const auto invariant = ResolveInvariantPhi(m_program, value);
 			if (invariant.IsEmpty()) {
 				return finish(false);
@@ -200,7 +241,14 @@ private:
 			    inst->Arg(1).GetType() != Type::U1) {
 				return finish(false);
 			}
-			return finish(RuntimeValidator(m_program, inst->Arg(1)).Run(inst->Arg(0)));
+			if (m_type == RuntimeValueType::Integer && !Validate(inst->Arg(1), false)) {
+				return finish(false);
+			}
+			const auto active_mask = m_active_mask;
+			m_active_mask          = inst->Arg(1).Resolve();
+			const bool valid       = Validate(inst->Arg(0));
+			m_active_mask          = active_mask;
+			return finish(valid);
 		}
 		if (op == ValueOpcode::GetSrtResource) {
 			if (inst->NumArgs() != 0) {
@@ -208,16 +256,7 @@ private:
 			}
 			return finish(true);
 		}
-		if (op == ValueOpcode::ReadConst) {
-			const auto slot = inst->NumArgs() == 2 ? inst->Arg(1).Resolve() : Value {};
-			if (inst->NumArgs() != 2 || inst->Arg(0).Resolve().TryInstruction() == nullptr ||
-			    inst->Arg(0).Resolve().TryInstruction()->GetOpcode() !=
-			        ValueOpcode::GetSrtResource ||
-			    !slot.IsImmediate() || slot.GetType() != Type::U32 ||
-			    slot.U32() >= m_program.srt_reads.size()) {
-				return finish(false);
-			}
-		} else if (op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::ReadConstBuffer) {
+		if (op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::ReadConstBuffer) {
 			const auto  expected = op == ValueOpcode::LoadAddressU32
 			                           ? ValueOpcode::GetAddressResource
 			                           : ValueOpcode::GetBufferResource;
@@ -241,12 +280,13 @@ private:
 				return finish(false);
 			}
 		}
-		if (op == ValueOpcode::GetBufferResource || op == ValueOpcode::GetImageResource ||
-		    op == ValueOpcode::GetSamplerResource || op == ValueOpcode::GetAddressResource) {
-			const size_t expected = op == ValueOpcode::GetBufferResource    ? 4u
-			                        : op == ValueOpcode::GetImageResource   ? 8u
-			                        : op == ValueOpcode::GetSamplerResource ? 4u
-			                                                                : 2u;
+		if (IsDescriptorHandle(op)) {
+			size_t expected = 4u;
+			if (op == ValueOpcode::GetImageResource) {
+				expected = 8u;
+			} else if (op == ValueOpcode::GetAddressResource) {
+				expected = 2u;
+			}
 			if (inst->NumArgs() != expected) {
 				return finish(false);
 			}
@@ -254,17 +294,14 @@ private:
 		           op != ValueOpcode::LoadAddressU32 && !IsRuntimeUniformOp(op) && op != ValueOpcode::ImageBvhIntersectRay) {
 			return finish(false);
 		}
-		for (size_t index = 0; index < inst->NumArgs(); index++) {
-			if (!Validate(inst->Arg(index))) {
-				return finish(false);
-			}
-		}
-		return finish(true);
+		return finish(ValidateArguments(*inst, true));
 	}
 
 	const ResourcePlan&             m_program;
+	RuntimeValueType                m_type;
 	Value                           m_active_mask;
 	std::unordered_set<const Inst*> m_visiting;
+	std::unordered_set<const Inst*> m_validated_dependencies;
 };
 
 class PlanBuilder {
@@ -1128,8 +1165,8 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 
 } // namespace
 
-bool ValidateRuntimeValue(const ResourcePlan& program, Value value) {
-	return RuntimeValidator(program).Run(value);
+bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValueType type) {
+	return RuntimeValidator(program, type).Run(value);
 }
 
 void BuildSrtPlan(Program& program) {
@@ -1139,6 +1176,24 @@ void BuildSrtPlan(Program& program) {
 	program.srt_plan_complete = false;
 	PlanBuilder(program).Run();
 	program.srt_plan_complete = true;
+}
+
+bool EvaluateUniformValues(const ResourcePlan& program, std::span<const Value> values,
+                            const SrtRuntime& runtime, std::span<uint32_t> results) {
+	if (values.size() != results.size()) {
+		return false;
+	}
+	auto clean = runtime;
+	clean.read_memory = runtime.read_specialization_memory != nullptr
+	                        ? runtime.read_specialization_memory
+	                        : +[](void*, uint64_t, uint32_t*) { return false; };
+	Evaluator evaluator(program, clean);
+	for (size_t i = 0; i < values.size(); ++i) {
+		if (!evaluator.Evaluate(values[i], results[i])) {
+			return false;
+		}
+	}
+	return true;
 }
 
 bool EvaluateDescriptorSource(const ResourcePlan& program, uint32_t source,
@@ -1154,21 +1209,23 @@ bool EvaluateDescriptorSource(const ResourcePlan& program, uint32_t source,
 bool EvaluateDescriptorSources(const ResourcePlan& program, std::span<const uint32_t> sources,
                                const SrtRuntime& runtime, std::vector<DescriptorValue>& results) {
 	std::vector<uint32_t> ignored;
-	return EvaluateRuntimeSourcesImpl(program, sources, runtime, results, ignored, false, {});
+	std::vector<uint8_t>  active;
+	return EvaluateRuntimeSourcesImpl(program, sources, runtime, results, ignored, false, {},
+	                                  active);
 }
 
 bool EvaluateRuntimeSources(const ResourcePlan& program, std::span<const uint32_t> sources,
                             const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
-                            std::vector<uint32_t>&   flat,
-                            std::span<const uint8_t> clean_flat_slots) {
+                            std::vector<uint32_t>& flat, std::span<const uint8_t> clean_flat_slots,
+                            std::vector<uint8_t>& active_sources) {
 	return EvaluateRuntimeSourcesImpl(program, sources, runtime, results, flat, true,
-	                                  clean_flat_slots);
+	                                  clean_flat_slots, active_sources);
 }
 
-bool WalkSrt(const ResourcePlan& program, const SrtRuntime& runtime,
-             std::vector<uint32_t>& flat) {
+bool WalkSrt(const ResourcePlan& program, const SrtRuntime& runtime, std::vector<uint32_t>& flat) {
 	std::vector<DescriptorValue> ignored;
-	return EvaluateRuntimeSources(program, {}, runtime, ignored, flat, {});
+	std::vector<uint8_t>         active;
+	return EvaluateRuntimeSources(program, {}, runtime, ignored, flat, {}, active);
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

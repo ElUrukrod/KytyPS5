@@ -179,13 +179,12 @@ private:
 	[[nodiscard]] GraphicsBindings PrepareGraphicsBindings(const ShaderStageRuntime& vertex,
 	                                                       const ShaderStageRuntime& pixel,
 	                                                       bool                      pixel_active);
-	void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer& buffer,
-	                              RenderColorInfo& target, uint32_t render_target_slice_offset = 0,
-	                              uint32_t render_target_slot = UINT32_MAX,
+	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
+	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
 	                              bool ignore_target_mask = false, bool exact_format = false);
-	void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer& buffer,
-	                              RenderDepthInfo& target);
-	[[nodiscard]] bool PrepareDrawRenderState(uint64_t submit_id, CommandBuffer& buffer,
+	void ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& target);
+	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
+	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer,
 	                                          const DrawCallInfo& draw,
 	                                          uint32_t            render_target_slice_offset,
 	                                          bool log_setup_phases, DrawRenderState& state);
@@ -195,8 +194,9 @@ private:
 	                         bool primitive_restart_enable, bool log_pipeline_phase,
 	                         bool set_bind_debug, bool set_auto_debug);
 	[[nodiscard]] RenderState AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
-	                                               uint32_t color_count, RenderDepthInfo& depth);
-	[[nodiscard]] bool        ResolveColorTargets(uint64_t submit_id, CommandBuffer& buffer,
+	                                               uint32_t color_count, RenderDepthInfo& depth,
+	                                               const std::optional<PreparedBindings>& pixel = std::nullopt);
+	[[nodiscard]] bool        ResolveColorTargets(CommandBuffer& buffer,
 	                                              uint32_t render_target_slice_offset);
 	void                      BindImage(ImageId id, bool storage);
 	void                      BindRenderTarget(ImageId id);
@@ -204,6 +204,9 @@ private:
 	void                      ResetBindings();
 	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
 	                                                     const CommandBuffer&          buffer);
+	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
+	                                              CommandBuffer& command, uint32_t group_x,
+	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);
 
 	RenderContext&                        m_context;
 	std::vector<ImageId>                  m_bound_images;
@@ -216,7 +219,7 @@ private:
 	friend struct RenderExecutorTestAccess;
 };
 
-[[nodiscard]] bool ResolveComputeImageClear(const ShaderComputeInputInfo& input, uint32_t group_x,
+[[nodiscard]] bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x,
                                             uint32_t group_y, uint32_t group_z, uint32_t mode,
                                             ShaderBufferResource& descriptor,
                                             uint32_t& packed_clear, uint64_t& size);

@@ -94,6 +94,7 @@ private:
 	bool IMAGE_GET_RESINFO(const Decoder::Instruction& inst);
 	bool IMAGE_GET_LOD(const Decoder::Instruction& inst);
 	bool IMAGE_LOAD(const Decoder::Instruction& inst);
+	bool IMAGE_BVH_INTERSECT_RAY(const Decoder::Instruction& inst);
 	bool IMAGE_STORE(const Decoder::Instruction& inst);
 	bool IMAGE_SAMPLE(const Decoder::Instruction& inst);
 	bool IMAGE_GATHER(const Decoder::Instruction& inst);

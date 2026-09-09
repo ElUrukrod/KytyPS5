@@ -744,6 +744,8 @@ bool EmitValueMemory(ValueEmitContext& ctx, const IR::Inst& inst);
 
 bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst);
 
+bool EmitValueBvh(ValueEmitContext& ctx, const IR::Inst& inst);
+
 void EmitProgram(EmitterState& state, const IR::Program& program);
 
 void DefineGetBdaPointer(EmitterState& state);

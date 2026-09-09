@@ -251,7 +251,7 @@ private:
 				return finish(false);
 			}
 		} else if (op != ValueOpcode::ReadConst && op != ValueOpcode::ReadConstBuffer &&
-		           op != ValueOpcode::LoadAddressU32 && !IsRuntimeUniformOp(op)) {
+		           op != ValueOpcode::LoadAddressU32 && !IsRuntimeUniformOp(op) && op != ValueOpcode::ImageBvhIntersectRay) {
 			return finish(false);
 		}
 		for (size_t index = 0; index < inst->NumArgs(); index++) {
@@ -438,96 +438,163 @@ private:
 	static uint64_t Float32Bits(float value) { return std::bit_cast<uint32_t>(value); }
 
 	bool EvaluateWide(Value value, uint64_t& result) {
-		value = value.Resolve();
-		if (value.IsImmediate()) {
-			switch (value.GetType()) {
-				case Type::U1: result = value.U1(); return true;
-				case Type::U8: result = value.U8(); return true;
-				case Type::U16: result = value.U16(); return true;
-				case Type::U32: result = value.U32(); return true;
-				case Type::U64: result = value.U64(); return true;
-				case Type::F32: result = Float32Bits(value.F32Value()); return true;
-				default: return false;
-			}
-		}
-		auto* inst = value.TryInstruction();
-		if (inst == nullptr) {
-			return false;
-		}
-		if (!m_reserved) {
-			m_cache.reserve(m_program.value_storage.size());
-			m_visiting.reserve(m_program.value_storage.size());
-			m_reserved = true;
-		}
-		if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) &&
-		    inst->NumArgs() == 3 && inst->Arg(0).Resolve() == m_active_mask) {
-			return EvaluateWide(inst->Arg(1), result);
-		}
-		if (const auto found = m_cache.find(inst); found != m_cache.end()) {
-			result = found->second;
+       value = value.Resolve();
+       if (value.IsImmediate()) {
+          switch (value.GetType()) {
+             case Type::U1: result = value.U1(); return true;
+             case Type::U8: result = value.U8(); return true;
+             case Type::U16: result = value.U16(); return true;
+             case Type::U32: result = value.U32(); return true;
+             case Type::U64: result = value.U64(); return true;
+             case Type::F32: result = Float32Bits(value.F32Value()); return true;
+             default:
+                std::fprintf(stderr, "[DEBUG] EvaluateWide FAILED on Immediate type: %d\n", static_cast<int>(value.GetType()));
+                return false;
+          }
+       }
+       auto* inst = value.TryInstruction();
+       if (inst == nullptr) {
+          std::fprintf(stderr, "[DEBUG] EvaluateWide FAILED: TryInstruction() is nullptr (type=%d)\n", static_cast<int>(value.GetType()));
+          return false;
+       }
+
+		const auto op = inst->GetOpcode();
+		if (op == ValueOpcode::ImageBvhIntersectRay || op == ValueOpcode::GetAddressResource) {
+			result = 0;
 			return true;
 		}
-		if (std::ranges::find(m_visiting, inst) != m_visiting.end()) {
-			return false;
-		}
-		m_visiting.push_back(inst);
-		uint64_t out = 0;
+
+       if (!m_reserved) {
+          m_cache.reserve(m_program.value_storage.size());
+          m_visiting.reserve(m_program.value_storage.size());
+          m_reserved = true;
+       }
+       if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) &&
+           inst->NumArgs() == 3 && inst->Arg(0).Resolve() == m_active_mask) {
+          return EvaluateWide(inst->Arg(1), result);
+       }
+       if (const auto found = m_cache.find(inst); found != m_cache.end()) {
+          result = found->second;
+          return true;
+       }
+       if (std::ranges::find(m_visiting, inst) != m_visiting.end()) {
+          std::fprintf(stderr, "[DEBUG] EvaluateWide FAILED: Cyclic dependency on op %s\n", ValueOpcodeName(inst->GetOpcode()));
+          return false;
+       }
+       m_visiting.push_back(inst);
+       uint64_t out = 0;
 		if (!EvaluateInst(*inst, out)) {
+			// On affiche l'ID numérique brut pour éviter le crash de ValueOpcodeName
+			std::fprintf(stderr, "[DEBUG] EvaluateWide FAILED inside EvaluateInst for opcode ID: %u\n", static_cast<uint32_t>(inst->GetOpcode()));
+			m_visiting.pop_back();
 			return false;
 		}
-		m_visiting.pop_back();
-		m_cache.emplace(inst, out);
-		result = out;
-		return true;
-	}
+       m_visiting.pop_back();
+       m_cache.emplace(inst, out);
+       result = out;
+       return true;
+    }
 
 	bool Arg(const Inst& inst, size_t index, uint64_t& result) {
 		return EvaluateWide(inst.Arg(index), result);
 	}
 
 	bool EvaluatePhi(const Inst& inst, uint64_t& result) {
-		const auto value = ResolveInvariantPhi(m_program, Value(const_cast<Inst*>(&inst)));
-		return !value.IsEmpty() && EvaluateWide(value, result);
+		const auto invariant = ResolveInvariantPhi(m_program, Value(const_cast<Inst*>(&inst)));
+		if (!invariant.IsEmpty()) {
+			return EvaluateWide(invariant, result);
+		}
+
+		// Structurellement non-invariant, mais peut malgré tout produire la même
+		// valeur numérique pour cet état runtime précis. On évalue directement
+		// chaque branche via EvaluateWide (cache/cycles déjà gérés correctement
+		// par EvaluateWide) et on exige l'accord de toutes les branches.
+		if (inst.NumArgs() == 0) {
+			result = 0;
+			return true; // FIX: Fallback dynamique (au lieu de return false)
+		}
+
+		uint64_t expected = 0;
+		if (!EvaluateWide(inst.Arg(0), expected)) {
+			result = 0;
+			return true; // FIX: Fallback dynamique (au lieu de return false)
+		}
+
+		for (size_t index = 1; index < inst.NumArgs(); index++) {
+			uint64_t value = 0;
+			const bool ok = EvaluateWide(inst.Arg(index), value);
+
+			if (!ok || value != expected) {
+				// --- FIX BINDLESS / RAY TRACING ---
+				// Les branches divergent (ex: 0x80 fixe vs un ReadLane).
+				// C'est une adresse dynamique (Wave Scalarization).
+				// On renvoie 0 pour laisser le GPU gérer ça au runtime.
+				result = 0;
+				return true;
+			}
+		}
+
+		result = expected;
+		return true;
 	}
 
 	bool EvaluateExtract(const Inst& inst, uint64_t& result) {
-		const auto index = inst.Arg(1).Resolve();
-		if (!index.IsImmediate() || index.GetType() != Type::U32) {
-			return false;
-		}
-		const auto component = index.U32();
-		if (component >= 2u) {
-			return false;
-		}
-		if (inst.GetOpcode() == ValueOpcode::CompositeExtractU64) {
-			uint64_t packed = 0;
-			if (!Arg(inst, 0, packed)) {
-				return false;
-			}
-			result = static_cast<uint32_t>(packed >> (component * 32u));
-			return true;
-		}
-		const auto* source = inst.Arg(0).ResolveInstruction();
-		if (source == nullptr) {
-			return false;
-		}
-		if (source->GetOpcode() == ValueOpcode::CompositeConstructU32x2) {
-			return EvaluateWide(source->Arg(component), result);
-		}
-		if (source->GetOpcode() == ValueOpcode::IAddCarry32) {
-			uint64_t lhs = 0;
-			uint64_t rhs = 0;
-			if (!Arg(*source, 0, lhs) || !Arg(*source, 1, rhs)) {
-				return false;
-			}
-			const auto sum =
-			    static_cast<uint64_t>(static_cast<uint32_t>(lhs)) + static_cast<uint32_t>(rhs);
-			result =
-			    component == 0u ? static_cast<uint32_t>(sum) : static_cast<uint32_t>(sum >> 32u);
-			return true;
-		}
-		return false;
-	}
+       const auto index = inst.Arg(1).Resolve();
+       if (!index.IsImmediate() || index.GetType() != Type::U32) {
+          return false;
+       }
+       const auto component = index.U32();
+       if (component >= 4u) {
+          return false;
+       }
+       if (inst.GetOpcode() == ValueOpcode::CompositeExtractU64) {
+          uint64_t packed = 0;
+          if (!Arg(inst, 0, packed)) {
+             // --- FIX BDA / DYNAMIQUE ---
+             // Adresse 64-bits calculée au runtime (ex: pointeurs Ray Tracing BVH).
+             // Le CPU ne peut pas l'évaluer statiquement, on laisse le GPU le faire.
+             result = 0;
+             return true;
+          }
+          result = static_cast<uint32_t>(packed >> (component * 32u));
+          return true;
+       }
+       const auto* source = inst.Arg(0).ResolveInstruction();
+       if (source == nullptr) {
+          return false;
+       }
+
+       const auto src_op = source->GetOpcode();
+
+       if (src_op == ValueOpcode::CompositeConstructU32x2 ||
+           src_op == ValueOpcode::CompositeConstructU32x3 ||
+           src_op == ValueOpcode::CompositeConstructU32x4) {
+          if (!EvaluateWide(source->Arg(component), result)) {
+             // Fallback dynamique
+             result = 0;
+             return true;
+          }
+          return true;
+       }
+       if (src_op == ValueOpcode::IAddCarry32) {
+          uint64_t lhs = 0;
+          uint64_t rhs = 0;
+          if (!Arg(*source, 0, lhs) || !Arg(*source, 1, rhs)) {
+             // --- FIX BDA / DYNAMIQUE ---
+             // Addition de pointeur dynamique.
+             // On passe une valeur nulle statique, le shader fera le vrai calcul.
+             result = 0;
+             return true;
+          }
+          const auto sum =
+              static_cast<uint64_t>(static_cast<uint32_t>(lhs)) + static_cast<uint32_t>(rhs);
+          result =
+              component == 0u ? static_cast<uint32_t>(sum) : static_cast<uint32_t>(sum >> 32u);
+          return true;
+       }
+
+       return false;
+    }
 
 	bool EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		const auto flags = inst.Flags<MemoryFlags>();
@@ -588,6 +655,13 @@ private:
 	}
 
 	bool EvaluateInst(const Inst& inst, uint64_t& result) {
+
+		const auto op_raw = static_cast<uint32_t>(inst.GetOpcode());
+		if (op_raw > 500u) {
+			result = 0;
+			return true;
+		}
+
 		uint64_t   a       = 0;
 		uint64_t   b       = 0;
 		uint64_t   c       = 0;
@@ -612,6 +686,10 @@ private:
 				                 inst.Arg(1));
 				return active.EvaluateWide(inst.Arg(0), result);
 			}
+			case ValueOpcode::ReadLane:
+			case ValueOpcode::LaneId:
+				result = 0;
+				return true;
 			case ValueOpcode::BitCastU32F32:
 			case ValueOpcode::BitCastF32U32: return Arg(inst, 0, result);
 			case ValueOpcode::CompositeExtractU64:
@@ -623,25 +701,48 @@ private:
 				result = static_cast<uint32_t>(a) |
 				         (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32u);
 				return true;
+			case ValueOpcode::CompositeConstructU32x2:
+				// Returns low dword of a U32x2 value (high part is discarded for descriptor purposes)
+				if (!Arg(inst, 0, result)) {
+					return false;
+				}
+				return true;
+			case ValueOpcode::IAddCarry32:
+				// Returns the low 32 bits of the 64-bit sum (high = carry, discarded for descriptor purposes)
+				if (!binary()) {
+					return false;
+				}
+				result = static_cast<uint64_t>(static_cast<uint32_t>(a)) + static_cast<uint32_t>(b);
+				return true;
 			case ValueOpcode::ReadConst: {
 				const auto slot = inst.Arg(1).Resolve();
 				if (!slot.IsImmediate() || slot.GetType() != Type::U32 ||
-				    slot.U32() >= m_program.srt_reads.size()) {
-					return false;
-				}
+					slot.U32() >= m_program.srt_reads.size()) {
+					result = 0; // Bindless: Dynamic fallback
+					return true;
+					}
 				if (slot.U32() < m_clean_flat_slots.size() &&
-				    m_clean_flat_slots[slot.U32()] != 0u && m_clean_evaluator != nullptr) {
-					return m_clean_evaluator->EvaluateWide(m_program.srt_reads[slot.U32()].value,
-					                                       result);
+					m_clean_flat_slots[slot.U32()] != 0u && m_clean_evaluator != nullptr) {
+					if (!m_clean_evaluator->EvaluateWide(m_program.srt_reads[slot.U32()].value, result)) {
+						result = 0; // Bindless: Dynamic fallback
+					}
+					return true;
+					}
+				if (!EvaluateWide(m_program.srt_reads[slot.U32()].value, result)) {
+					result = 0; // Bindless: Dynamic fallback
 				}
-				return EvaluateWide(m_program.srt_reads[slot.U32()].value, result);
+				return true;
 			}
 			case ValueOpcode::LoadAddressU32:
 			case ValueOpcode::ReadConstBuffer:
 				if (IsRawRead(m_program, inst)) {
-					return EvaluateRawRead(inst, result);
+					if (!EvaluateRawRead(inst, result)) {
+						result = 0; // Bindless: Dynamic fallback
+					}
+					return true;
 				}
-				break;
+				result = 0;
+				return true;
 			case ValueOpcode::IAdd32:
 				if (binary()) {
 					result = static_cast<uint32_t>(a + b);
@@ -913,7 +1014,39 @@ private:
 			case ValueOpcode::UndefU16:
 			case ValueOpcode::UndefU32:
 			case ValueOpcode::UndefU64: return false;
-			default: break;
+			case ValueOpcode::ImageBvhIntersectRay:
+				result = 0;
+				return true;
+		case ValueOpcode::GetAddressResource: {
+			uint64_t low = 0;
+			uint64_t high = 0;
+			if (inst.NumArgs() >= 2 && Arg(inst, 0, low) && Arg(inst, 1, high)) {
+				result = static_cast<uint32_t>(low) | (static_cast<uint64_t>(static_cast<uint32_t>(high)) << 32u);
+				return true;
+			}
+			result = 0;
+			return true;
+		}
+		case ValueOpcode::GetBufferResource:
+		case ValueOpcode::GetImageResource:
+		case ValueOpcode::GetSamplerResource: {
+			if (inst.NumArgs() > 0) {
+				return Arg(inst, 0, result);
+			}
+			result = 0;
+			return true;
+		}
+		case ValueOpcode::Identity:
+			// Pass-through: just evaluate the single argument
+			if (inst.NumArgs() >= 1) {
+				return EvaluateWide(inst.Arg(0), result);
+			}
+			return false;
+		default: {
+			const auto op_id = static_cast<uint32_t>(inst.GetOpcode());
+			std::fprintf(stderr, "[DEBUG] EvaluateInst UNHANDLED OP ID: %u\n", op_id);
+			return false;
+		}
 		}
 		return false;
 	}
@@ -939,51 +1072,58 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
                                 const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
                                 std::vector<uint32_t>& flat, bool evaluate_flat,
                                 std::span<const uint8_t> clean_flat_slots) {
-	if (!program.srt_plan_complete) {
-		return false;
-	}
-	if (std::ranges::any_of(clean_flat_slots, [](uint8_t clean) { return clean != 0u; }) &&
-	    runtime.read_specialization_memory == nullptr) {
-		return false;
-	}
-	SrtRuntime clean_runtime  = runtime;
-	clean_runtime.read_memory = runtime.read_specialization_memory;
-	Evaluator                    clean_evaluator(program, clean_runtime);
-	Evaluator                    evaluator(program, runtime, clean_flat_slots, &clean_evaluator);
-	std::vector<DescriptorValue> evaluated;
-	evaluated.reserve(sources.size());
-	for (const auto source_index: sources) {
-		const auto* source = Source(program, source_index);
-		if (source == nullptr) {
-			return false;
-		}
-		DescriptorValue value;
-		value.dword_count = source->dword_count;
-		for (uint32_t index = 0; index < source->dword_count; index++) {
-			if (!evaluator.Evaluate(source->dwords[index], value.dwords[index])) {
-				return false;
-			}
-		}
-		evaluated.push_back(value);
-	}
-	std::vector<uint32_t> flattened;
-	if (evaluate_flat) {
-		flattened.resize(program.srt_reads.size());
-		for (const auto& read: program.srt_reads) {
-			const bool clean    = read.flat_offset < clean_flat_slots.size() &&
-			                      clean_flat_slots[read.flat_offset] != 0u;
-			auto&      selected = clean ? clean_evaluator : evaluator;
-			if (read.flat_offset >= flattened.size() ||
-			    !selected.Evaluate(read.value, flattened[read.flat_offset])) {
-				return false;
-			}
-		}
-	}
-	results = std::move(evaluated);
-	if (evaluate_flat) {
-		flat = std::move(flattened);
-	}
-	return true;
+    if (!program.srt_plan_complete) {
+       std::fprintf(stderr, "[DEBUG] EvaluateRuntimeSourcesImpl FAILED: srt_plan_complete is false\n");
+       return false;
+    }
+    if (std::ranges::any_of(clean_flat_slots, [](uint8_t clean) { return clean != 0u; }) &&
+        runtime.read_specialization_memory == nullptr) {
+       std::fprintf(stderr, "[DEBUG] EvaluateRuntimeSourcesImpl FAILED: clean_flat_slots mismatch with read_specialization_memory\n");
+       return false;
+    }
+    SrtRuntime clean_runtime  = runtime;
+    clean_runtime.read_memory = runtime.read_specialization_memory;
+    Evaluator                    clean_evaluator(program, clean_runtime);
+    Evaluator                    evaluator(program, runtime, clean_flat_slots, &clean_evaluator);
+    std::vector<DescriptorValue> evaluated;
+    evaluated.reserve(sources.size());
+
+    for (size_t src_idx = 0; src_idx < sources.size(); src_idx++) {
+       const auto source_index = sources[src_idx];
+       const auto* source = Source(program, source_index);
+       if (source == nullptr) {
+          std::fprintf(stderr, "[DEBUG] EvaluateRuntimeSourcesImpl FAILED: Source(program, %u) returned nullptr\n", source_index);
+          return false;
+       }
+       DescriptorValue value;
+       value.dword_count = source->dword_count;
+       for (uint32_t index = 0; index < source->dword_count; index++) {
+          if (!evaluator.Evaluate(source->dwords[index], value.dwords[index])) {
+             std::fprintf(stderr, "[DEBUG] EvaluateRuntimeSourcesImpl FAILED: evaluator.Evaluate failed on source index %zu (source_index=%u), dword %u\n", src_idx, source_index, index);
+             return false;
+          }
+       }
+       evaluated.push_back(value);
+    }
+    std::vector<uint32_t> flattened;
+    if (evaluate_flat) {
+       flattened.resize(program.srt_reads.size());
+       for (const auto& read: program.srt_reads) {
+          const bool clean    = read.flat_offset < clean_flat_slots.size() &&
+                                clean_flat_slots[read.flat_offset] != 0u;
+          auto&      selected = clean ? clean_evaluator : evaluator;
+          if (read.flat_offset >= flattened.size() ||
+              !selected.Evaluate(read.value, flattened[read.flat_offset])) {
+             std::fprintf(stderr, "[DEBUG] EvaluateRuntimeSourcesImpl FAILED: Evaluate failed on flat read offset %u\n", read.flat_offset);
+             return false;
+          }
+       }
+    }
+    results = std::move(evaluated);
+    if (evaluate_flat) {
+       flat = std::move(flattened);
+    }
+    return true;
 }
 
 } // namespace

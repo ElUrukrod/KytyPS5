@@ -700,6 +700,28 @@ bool Translator::IMAGE_GATHER(const Decoder::Instruction& inst) {
 	return true;
 }
 
+	bool Translator::IMAGE_BVH_INTERSECT_RAY(const Decoder::Instruction& inst) {
+	if (inst.opcode == Decoder::Opcode::IMAGE_BVH64_INTERSECT_RAY) {
+		return false; // 64-bit node pointer: not implemented yet.
+	}
+
+	const auto resource_index = ResourceIndexFromOperand(inst.src1);
+	const auto base_low       = GetResourceDword(resource_index, 0);
+	const auto base_high      = IR::U32(ir.Emit(IR::ValueOpcode::BitwiseAnd32,
+												{GetResourceDword(resource_index, 1),
+												 IR::Value(0xffffu)}));
+	const auto resource = GetAddressResource(base_low, base_high);
+	const auto address  = MakeImageAddress(inst, inst.src0);
+
+	const auto result = ir.Emit(IR::ValueOpcode::ImageBvhIntersectRay,
+								{resource, address, ir.GetExec()});
+	for (uint32_t index = 0; index < 4u; index++) {
+		WriteOperand(OffsetOperand(inst.dst, index),
+					ir.Emit(IR::ValueOpcode::CompositeExtractU32x4, {result, IR::Value(index)}));
+	}
+	return true;
+}
+
 IR::Value Translator::LoadSharedU32(uint32_t width, IR::U32 address, const IR::MemoryInfo& memory,
                                     uint32_t pc) {
 	IR::ValueOpcode opcode;
@@ -1046,6 +1068,9 @@ bool Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::IMAGE_GATHER4_C_O:
 		case Decoder::Opcode::IMAGE_GATHER4_C_LZ_O:
 		case Decoder::Opcode::IMAGE_GATHER4H: return IMAGE_GATHER(inst);
+		case Decoder::Opcode::IMAGE_BVH_INTERSECT_RAY:
+		case Decoder::Opcode::IMAGE_BVH64_INTERSECT_RAY:
+			return IMAGE_BVH_INTERSECT_RAY(inst);
 
 		case Decoder::Opcode::DS_MIN_F32:
 			return DS_MINMAX_F32(inst, IR::ValueOpcode::SharedAtomicFMin32);

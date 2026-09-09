@@ -999,6 +999,74 @@ void StoreWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compo
 	});
 }
 
+	uint32_t GlslExt1(EmitterState& state, uint32_t type, uint32_t glsl_opcode, uint32_t a) {
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction({OpExtInst, type, result, GlslStd450(state), glsl_opcode, a});
+	return result;
+}
+
+uint32_t GlslExt2(EmitterState& state, uint32_t type, uint32_t glsl_opcode, uint32_t a,
+                  uint32_t b) {
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction({OpExtInst, type, result, GlslStd450(state), glsl_opcode, a, b});
+	return result;
+}
+
+constexpr uint32_t kBvhNodeTypeBox32 = 5u;
+constexpr uint32_t kBvhInvalidChild  = 0xffffffffu;
+
+uint32_t NodeByteAddress(EmitterState& state, uint32_t node_ptr) {
+	const auto offset_units = Binary(state, OpShiftRightLogical, TypeU32(state), node_ptr,
+	                                 ConstantU32(state, 3));
+	return Binary(state, OpShiftLeftLogical, TypeU32(state), offset_units, ConstantU32(state, 6));
+}
+
+uint32_t NodeType(EmitterState& state, uint32_t node_ptr) {
+	return Binary(state, OpBitwiseAnd, TypeU32(state), node_ptr, ConstantU32(state, 0x7u));
+}
+
+	uint32_t LoadNodeF32(ValueEmitContext& ctx, uint32_t base_device_address, uint32_t byte_offset) {
+	auto&      state   = ctx.state;
+	const auto address = Binary(state, OpIAdd, TypeDeviceAddress(state), base_device_address,
+								Unary(state, OpUConvert, TypeDeviceAddress(state),
+									  ConstantU32(state, byte_offset)));
+	return Unary(state, OpBitcast, TypeF32(state), LoadBdaDword(ctx, address));
+}
+
+	uint32_t LoadNodeU32(ValueEmitContext& ctx, uint32_t base_device_address, uint32_t byte_offset) {
+	auto&      state   = ctx.state;
+	const auto address = Binary(state, OpIAdd, TypeDeviceAddress(state), base_device_address,
+								Unary(state, OpUConvert, TypeDeviceAddress(state),
+									  ConstantU32(state, byte_offset)));
+	return LoadBdaDword(ctx, address);
+}
+
+struct SlabResult {
+	uint32_t hit;
+	uint32_t t;
+};
+
+uint32_t IntersectAabbT(EmitterState& state, uint32_t origin[3], uint32_t inv_dir[3],
+                        uint32_t box_min[3], uint32_t box_max[3], uint32_t t_min, uint32_t t_max,
+                        uint32_t& out_hit) {
+	uint32_t tmin = t_min;
+	uint32_t tmax = t_max;
+	for (uint32_t axis = 0; axis < 3u; axis++) {
+		const auto t0 = Binary(state, OpFMul, TypeF32(state),
+		                       Binary(state, OpFSub, TypeF32(state), box_min[axis], origin[axis]),
+		                       inv_dir[axis]);
+		const auto t1 = Binary(state, OpFMul, TypeF32(state),
+		                       Binary(state, OpFSub, TypeF32(state), box_max[axis], origin[axis]),
+		                       inv_dir[axis]);
+		const auto near_t = GlslExt2(state, TypeF32(state), GlslFMin, t0, t1);
+		const auto far_t  = GlslExt2(state, TypeF32(state), GlslFMax, t0, t1);
+		tmin              = GlslExt2(state, TypeF32(state), GlslFMax, tmin, near_t);
+		tmax              = GlslExt2(state, TypeF32(state), GlslFMin, tmax, far_t);
+	}
+	out_hit = Binary(state, OpFOrdLessThanEqual, TypeBool(state), tmin, tmax);
+	return tmin;
+}
+
 } // namespace
 
 void DefineGetBdaPointer(EmitterState& state) {
@@ -1051,6 +1119,165 @@ void DefineGetBdaPointer(EmitterState& state) {
 	                           available, available_label});
 	state.builder.AddFunction({OpReturnValue, result});
 	state.builder.AddFunction({OpFunctionEnd});
+}
+
+bool EmitValueBvh(ValueEmitContext& ctx, const IR::Inst& inst) {
+    if (inst.GetOpcode() != IR::ValueOpcode::ImageBvhIntersectRay) {
+        return false;
+    }
+    auto& state = ctx.state;
+
+    const auto* handle = inst.Arg(0).Resolve().TryInstruction();
+    if (handle == nullptr || handle->GetOpcode() != IR::ValueOpcode::GetAddressResource) {
+        ctx.Fail(inst, "BVH intersect has no address base pair");
+        return true;
+    }
+    const auto  base    = DeviceAddressFromWords(state, ctx.Arg(*handle, 0), ctx.Arg(*handle, 1));
+    const auto* address = ctx.ImageAddress(inst.Arg(1));
+    const auto  active  = ctx.Arg(inst, 2);
+
+    ctx.Define(inst, EmitValueOrDefaultIfCondition(
+        state, active, TypeU32Vector(state, 4), ConstantU32CompositeZero(state, 4), [&]() {
+            const auto node_ptr  = ctx.Arg(*address, 0);
+            const auto node_addr = Binary(state, OpIAdd, TypeDeviceAddress(state), base,
+                                          Unary(state, OpUConvert, TypeDeviceAddress(state),
+                                                NodeByteAddress(state, node_ptr)));
+            const auto type = NodeType(state, node_ptr);
+
+            const auto ox = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 2));
+            const auto oy = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 3));
+            const auto oz = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 4));
+            const auto dx = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 5));
+            const auto dy = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 6));
+            const auto dz = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 7));
+            const auto ix = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 8));
+            const auto iy = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 9));
+            const auto iz = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 10));
+            const auto t_max = Unary(state, OpBitcast, TypeF32(state), ctx.Arg(*address, 1));
+
+            const auto is_box = Binary(state, OpIEqual, TypeBool(state), type,
+                                       ConstantU32(state, kBvhNodeTypeBox32));
+
+            uint32_t child_ptr[4];
+            uint32_t child_t[4];
+            for (uint32_t i = 0; i < 4u; i++) {
+                child_ptr[i] = LoadNodeU32(ctx, node_addr, i * 4u);
+            }
+            for (uint32_t i = 0; i < 4u; i++) {
+                const uint32_t box_off = 16u + i * 24u;
+                uint32_t       box_min[3] = {LoadNodeF32(ctx, node_addr, box_off + 0u),
+                                            LoadNodeF32(ctx, node_addr, box_off + 4u),
+                                            LoadNodeF32(ctx, node_addr, box_off + 8u)};
+                uint32_t       box_max[3] = {LoadNodeF32(ctx, node_addr, box_off + 12u),
+                                            LoadNodeF32(ctx, node_addr, box_off + 16u),
+                                            LoadNodeF32(ctx, node_addr, box_off + 20u)};
+                uint32_t       origin[3]  = {ox, oy, oz};
+                uint32_t       inv_dir[3] = {ix, iy, iz};
+                uint32_t       hit        = 0;
+                child_t[i] = IntersectAabbT(state, origin, inv_dir, box_min, box_max,
+                                           ConstantF32Value(state, 0.0f), t_max, hit);
+                child_ptr[i] = Select(state, TypeU32(state), hit, child_ptr[i],
+                                     ConstantU32(state, kBvhInvalidChild));
+            }
+
+            auto swap_if_greater = [&](uint32_t a, uint32_t b) {
+                const auto greater = Binary(state, OpFOrdGreaterThan, TypeBool(state), child_t[a],
+                                            child_t[b]);
+                const auto t0 = child_t[a], p0 = child_ptr[a];
+                child_t[a]   = Select(state, TypeF32(state), greater, child_t[b], child_t[a]);
+                child_ptr[a] = Select(state, TypeU32(state), greater, child_ptr[b], child_ptr[a]);
+                child_t[b]   = Select(state, TypeF32(state), greater, t0, child_t[b]);
+                child_ptr[b] = Select(state, TypeU32(state), greater, p0, child_ptr[b]);
+            };
+            swap_if_greater(0, 1); swap_if_greater(2, 3); swap_if_greater(0, 2);
+            swap_if_greater(1, 3); swap_if_greater(1, 2);
+
+            uint32_t v0[3], v1[3], v2[3];
+            for (uint32_t axis = 0; axis < 3u; axis++) {
+                v0[axis] = LoadNodeF32(ctx, node_addr, 0u + axis * 4u);
+                v1[axis] = LoadNodeF32(ctx, node_addr, 12u + axis * 4u);
+                v2[axis] = LoadNodeF32(ctx, node_addr, 24u + axis * 4u);
+            }
+            const auto triangle_id = LoadNodeU32(ctx, node_addr, 48u);
+
+            auto sub3 = [&](uint32_t a[3], uint32_t b[3], uint32_t out[3]) {
+                for (uint32_t k = 0; k < 3; k++) out[k] = Binary(state, OpFSub, TypeF32(state), a[k], b[k]);
+            };
+            auto cross3 = [&](uint32_t a[3], uint32_t b[3], uint32_t out[3]) {
+                out[0] = Binary(state, OpFSub, TypeF32(state),
+                               Binary(state, OpFMul, TypeF32(state), a[1], b[2]),
+                               Binary(state, OpFMul, TypeF32(state), a[2], b[1]));
+                out[1] = Binary(state, OpFSub, TypeF32(state),
+                               Binary(state, OpFMul, TypeF32(state), a[2], b[0]),
+                               Binary(state, OpFMul, TypeF32(state), a[0], b[2]));
+                out[2] = Binary(state, OpFSub, TypeF32(state),
+                               Binary(state, OpFMul, TypeF32(state), a[0], b[1]),
+                               Binary(state, OpFMul, TypeF32(state), a[1], b[0]));
+            };
+            auto dot3 = [&](uint32_t a[3], uint32_t b[3]) {
+                auto sum = Binary(state, OpFMul, TypeF32(state), a[0], b[0]);
+                sum      = Binary(state, OpFAdd, TypeF32(state), sum,
+                                Binary(state, OpFMul, TypeF32(state), a[1], b[1]));
+                return Binary(state, OpFAdd, TypeF32(state), sum,
+                             Binary(state, OpFMul, TypeF32(state), a[2], b[2]));
+            };
+
+            uint32_t e1[3], e2[3];
+            uint32_t dir[3]      = {dx, dy, dz};
+            uint32_t origin_v[3] = {ox, oy, oz};
+            sub3(v1, v0, e1); sub3(v2, v0, e2);
+            uint32_t pvec[3]; cross3(dir, e2, pvec);
+            const auto det     = dot3(e1, pvec);
+            const auto abs_det = GlslExt1(state, TypeF32(state), GlslFAbs, det);
+            const auto epsilon = ConstantF32Value(state, 1e-7f);
+            const auto det_ok  = Binary(state, OpFOrdGreaterThan, TypeBool(state), abs_det, epsilon);
+            const auto inv_det = Binary(state, OpFDiv, TypeF32(state), ConstantF32Value(state, 1.0f), det);
+
+            uint32_t tvec[3]; sub3(origin_v, v0, tvec);
+            const auto u = Binary(state, OpFMul, TypeF32(state), dot3(tvec, pvec), inv_det);
+            uint32_t qvec[3]; cross3(tvec, e1, qvec);
+            const auto v = Binary(state, OpFMul, TypeF32(state), dot3(dir, qvec), inv_det);
+            const auto t = Binary(state, OpFMul, TypeF32(state), dot3(e2, qvec), inv_det);
+
+            const auto u_ok = Binary(state, OpLogicalAnd, TypeBool(state),
+                                     Binary(state, OpFOrdGreaterThanEqual, TypeBool(state), u,
+                                            ConstantF32Value(state, 0.0f)),
+                                     Binary(state, OpFOrdLessThanEqual, TypeBool(state), u,
+                                            ConstantF32Value(state, 1.0f)));
+            const auto v_ok  = Binary(state, OpFOrdGreaterThanEqual, TypeBool(state), v,
+                                      ConstantF32Value(state, 0.0f));
+            const auto sum_ok = Binary(state, OpFOrdLessThanEqual, TypeBool(state),
+                                      Binary(state, OpFAdd, TypeF32(state), u, v),
+                                      ConstantF32Value(state, 1.0f));
+            const auto range_ok = Binary(state, OpLogicalAnd, TypeBool(state),
+                                        Binary(state, OpFOrdGreaterThanEqual, TypeBool(state), t,
+                                               ConstantF32Value(state, 0.0f)),
+                                        Binary(state, OpFOrdLessThanEqual, TypeBool(state), t, t_max));
+            auto tri_hit = Binary(state, OpLogicalAnd, TypeBool(state), det_ok, u_ok);
+            tri_hit      = Binary(state, OpLogicalAnd, TypeBool(state), tri_hit, v_ok);
+            tri_hit      = Binary(state, OpLogicalAnd, TypeBool(state), tri_hit, sum_ok);
+            tri_hit      = Binary(state, OpLogicalAnd, TypeBool(state), tri_hit, range_ok);
+
+            const auto out_t  = Select(state, TypeF32(state), tri_hit, t, t_max);
+            const auto out_id = Select(state, TypeU32(state), tri_hit, triangle_id,
+                                      ConstantU32(state, kBvhInvalidChild));
+
+        	// --- VULKAN FIX: OPSELECT ---
+            // OpSelect with a scalar condition cannot select between vectors in SPIR-V < 1.4.
+        	// Performing component-wise selection instead:
+            const auto r0 = Select(state, TypeU32(state), is_box, child_ptr[0], Unary(state, OpBitcast, TypeU32(state), out_t));
+            const auto r1 = Select(state, TypeU32(state), is_box, child_ptr[1], out_id);
+            const auto r2 = Select(state, TypeU32(state), is_box, child_ptr[2], ConstantU32(state, 0u));
+            const auto r3 = Select(state, TypeU32(state), is_box, child_ptr[3], ConstantU32(state, 0u));
+
+            const auto final_res = state.builder.AllocateId();
+            state.builder.AddFunction(
+                {OpCompositeConstruct, TypeU32Vector(state, 4), final_res,
+                 r0, r1, r2, r3});
+
+            return final_res;
+        }));
+    return true;
 }
 
 bool EmitValueMemory(ValueEmitContext& ctx, const IR::Inst& inst) {

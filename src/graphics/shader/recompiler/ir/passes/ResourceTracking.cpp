@@ -658,6 +658,13 @@ private:
 			AddMemoryPatch(flags.index, resource, 0, false, flags.pc);
 			return;
 		}
+
+		if (inst.GetOpcode() == ValueOpcode::ImageBvhIntersectRay) {
+			ValidateAddressHandle(inst.Arg(0), flags.pc);
+			m_info.uses_dma = true;
+			return;
+		}
+
 		if (address_info.access != AddressAccess::None) {
 			if (!IsAddressResourceKind(memory.kind)) {
 				Fail(flags.pc, "address operation has invalid resource kind");

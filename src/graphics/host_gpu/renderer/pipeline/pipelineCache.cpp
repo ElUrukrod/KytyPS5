@@ -278,6 +278,7 @@ struct PipelineCache::ProgramCache {
 		const ShaderRecompiler::IR::SrtRuntime       runtime {
 		    .user_data                  = params.user_data,
 		    .shader_base                = params.Base(),
+			.read_memory				= ReadShaderGuestMemory,
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {

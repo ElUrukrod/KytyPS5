@@ -312,6 +312,51 @@ void DecodeMimg(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	const uint32_t ssamp  = (word1 >> 21u) & 0x1fu;
 	const bool     r128   = ((word0 >> 15u) & 0x1u) != 0u;
 	const bool     a16    = ((word1 >> 30u) & 0x1u) != 0u;
+
+	if (opcode == 0xe6u || opcode == 0xe7u) {
+		// PS5 Custom ISA : image_bvh_intersect_ray = 0xe6, image_bvh64_intersect_ray = 0xe7
+		const bool     is_64          = (opcode == 0xe7u);
+		const uint32_t node_ptr_words = is_64 ? 2u : 1u;
+
+		inst.pc                = pc;
+		inst.word               = word0;
+		inst.word_count          = word_count;
+		inst.family              = Family::MIMG;
+		inst.opcode_id           = opcode;
+		inst.opcode              = is_64 ? Opcode::IMAGE_BVH64_INTERSECT_RAY
+										 : Opcode::IMAGE_BVH_INTERSECT_RAY;
+		inst.dmask               = 0xfu;
+		inst.data_components     = 4u;
+		inst.data_bits           = 32u;
+		inst.data_dwords         = 4u;
+		inst.glc                 = ((word0 >> 13u) & 1u) != 0;
+		inst.slc                 = ((word0 >> 25u) & 1u) != 0;
+		inst.image_sample_flags  = a16 ? ImageSampleFlagA16 : 0u;
+		inst.image_dimension     = ImageDimension::Unknown;
+		inst.image_r128          = r128;
+		inst.image_nsa_dwords    = nsa_dwords;
+		for (uint32_t i = 0; i < nsa_dwords * 4u; i++) {
+			inst.image_nsa_addr[i] = (code[word_index + 2u + i / 4u] >> ((i % 4u) * 8u)) & 0xffu;
+		}
+		inst.image_address_components = node_ptr_words + 1u + 3u + 3u + 3u;
+		SetRawWords(inst, code, word_index, word_count);
+
+		if (!r128) {
+			SetUnsupported(inst, Family::MIMG, opcode,
+						   "image_bvh_intersect_ray requires R128=1");
+		}
+		if (a16) {
+			SetUnsupported(inst, Family::MIMG, opcode,
+						   "image_bvh_intersect_ray A16 addressing is not implemented yet");
+		}
+
+		DecodeVectorGpr(vdata, inst.dst);
+		DecodeVectorGpr(vaddr, inst.src0);
+		DecodeScalarSource(srsrc * 4u, pc, inst.src1);
+		inst.src_count = 2;
+		return;
+	}
+
 	const bool     d16    = ((word1 >> 31u) & 0x1u) != 0u;
 	const auto*    sample = LookupSample(opcode);
 	const auto*    gather = LookupGather(opcode);

@@ -651,7 +651,7 @@ Prospero::BufferFormat RenderTargetTransferFormat(uint32_t bytes_per_element) {
 
 } // namespace ImageOps
 
-Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& image_info)
+	Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& image_info)
     : info(image_info), m_graphics(graphics), m_scheduler(scheduler) {
 	KYTY_PROFILER_FUNCTION();
 	ImageOps::Validate(info);
@@ -659,24 +659,6 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	    !info.data.Empty() && info.metadata.compression == VideoOutCompression::Uncompressed;
 	if (info.pixel_format == vk::Format::eUndefined) {
 		return;
-	}
-
-	backing.format      = info.pixel_format;
-	backing.image_type  = HostImageType(info.type);
-	backing.extent      = info.extent;
-	backing.guest_pitch = info.pitch;
-	backing.layers      = info.IsVolume() ? 1u : info.resources.layers;
-	backing.mip_levels  = info.resources.levels;
-	backing.samples     = info.samples;
-	backing.flags       = ImageCreateFlags(info);
-	backing.usage       = ImageUsageFlags(graphics, info);
-
-	const int format_id = static_cast<int>(backing.format);
-	if (format_id >= 131 && format_id <= 182) {
-		if (static_cast<uint32_t>(backing.usage) & static_cast<uint32_t>(vk::ImageUsageFlagBits::eStorage)) {
-			std::fprintf(stderr, "[DEBUG] Stripping illegal STORAGE flag from compressed format %d\n", format_id);
-			backing.usage &= ~vk::ImageUsageFlagBits::eStorage;
-		}
 	}
 
 	vk::ImageCreateInfo create {};
@@ -690,6 +672,14 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	create.initialLayout = vk::ImageLayout::eUndefined;
 	create.usage         = ImageUsageFlags(graphics, info);
 	create.samples       = vulkan_sample_count(info.samples);
+
+	const int format_id = static_cast<int>(create.format);
+	if (format_id >= 131 && format_id <= 182) {
+		if (static_cast<uint32_t>(create.usage) & static_cast<uint32_t>(vk::ImageUsageFlagBits::eStorage)) {
+			std::fprintf(stderr, "[DEBUG] Stripping illegal STORAGE flag from compressed format %d\n", format_id);
+			create.usage &= ~vk::ImageUsageFlagBits::eStorage;
+		}
+	}
 
 	vk::ImageFormatProperties properties {};
 	if (graphics.GetImageFormatProperties(create.format, create.imageType, create.tiling,

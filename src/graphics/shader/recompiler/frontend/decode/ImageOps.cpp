@@ -337,7 +337,6 @@ void DecodeMimg(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 		const uint32_t node_ptr_words = is_64 ? 2u : 1u;
 
 		inst.pc                = pc;
-		inst.word               = word0;
 		inst.word_count          = word_count;
 		inst.family              = Family::MIMG;
 		inst.opcode_id           = opcode;

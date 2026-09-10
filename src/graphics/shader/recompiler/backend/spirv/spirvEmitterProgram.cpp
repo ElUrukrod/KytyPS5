@@ -157,7 +157,7 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block,
 			}
 			const auto condition = BranchCondition(ctx, info);
 
-			if (!term.loop_header && term.merge_block == UINT32_MAX) {
+			if (ctx.state.stage == ShaderType::Compute && !term.loop_header && term.merge_block == UINT32_MAX) {
 				const uint32_t dummy_merge = ctx.state.builder.AllocateId();
 				ctx.state.builder.AddFunction({OpSelectionMerge, dummy_merge, SelectionControlNone});
 				ctx.state.builder.AddFunction({OpBranchConditional, condition, ctx.Label(true_block), ctx.Label(false_block)});

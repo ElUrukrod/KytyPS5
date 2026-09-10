@@ -1036,8 +1036,8 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw, bool
 		LogDrawPhase(draw.name, "GetGraphicsPrograms");
 	}
 	state.programs = pipeline_cache.GetGraphicsPrograms(
-	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, target_export_mapping,
-	    state.ps_active, state.vs_input_info, state.ps_input_info);
+	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
+	    target_export_mapping, state.ps_active, state.vs_input_info, state.ps_input_info);
 }
 
 static PreparedVertexBuffers PrepareVertexBuffers(uint64_t submit_id, CommandBuffer& buffer,
@@ -1176,12 +1176,38 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          bool set_bind_debug, bool set_auto_debug) {
 	EXIT_IF(draw.name == nullptr);
 	auto& ucfg = buffer.GetUserConfig();
+	const bool mesh_active = state.vs_input_info.stage.program->stage == ShaderType::Mesh;
+	uint32_t   mesh_groups = 0;
+	if (mesh_active) {
+		const auto& mesh = state.vs_input_info.mesh;
+		if (emit.indexed || ucfg.GetPrimType() != Prospero::PrimitiveType::kTriStrip ||
+		    primitive_restart_enable || mesh.primitives_per_group == 0) {
+			EXIT("unsupported mesh draw: primitive=%u indexed=%u restart=%u\n",
+			     static_cast<uint32_t>(ucfg.GetPrimType()), emit.indexed, primitive_restart_enable);
+		}
+		if (draw.index_count < 3 || draw.instance_count == 0) {
+			return;
+		}
+		mesh_groups        = (draw.index_count - 3u) / mesh.primitives_per_group + 1u;
+		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
+		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
+		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
+		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
+		        limits.maxMeshWorkGroupTotalCount) {
+			EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
+			     draw.instance_count);
+		}
+	}
 
 	LogDrawPhase(draw.name, "PrepareBindings");
 	auto bindings = PrepareGraphicsBindings(state.vs_input_info.stage, state.ps_input_info.stage,
 	                                        state.ps_active);
-	auto vertex_bindings = PrepareVertexBuffers(submit_id, buffer, draw, state.vs_input_info);
-	auto index_binding   = PrepareIndexBuffer(buffer, index_source);
+	PreparedVertexBuffers vertex_bindings;
+	PreparedIndexBuffer   index_binding;
+	if (!mesh_active) {
+		vertex_bindings = PrepareVertexBuffers(submit_id, buffer, draw, state.vs_input_info);
+		index_binding   = PrepareIndexBuffer(buffer, index_source);
+	}
 	state.rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info);
 
@@ -1203,7 +1229,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (set_auto_debug) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x200u);
 	}
-	CommitVertexBuffers(vk_buffer, vertex_bindings);
+	if (!mesh_active) {
+		CommitVertexBuffers(vk_buffer, vertex_bindings);
+	}
 	if (bindings.pixel.has_value()) {
 		if (set_auto_debug) {
 			SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
@@ -1216,7 +1244,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline,
 	               std::span {descriptor_stages.data(), descriptor_stage_count});
-	CommitIndexBuffer(vk_buffer, index_binding);
+	if (mesh_active) {
+		const uint32_t draw_data[] {draw.index_count, emit.first_vertex, emit.first_instance};
+		static_assert(std::size(draw_data) == ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
+		vk_buffer.pushConstants(pipeline.pipeline_layout,
+		                        vk::ShaderStageFlagBits::eMeshEXT |
+		                            vk::ShaderStageFlagBits::eFragment,
+		                        0, sizeof(draw_data), draw_data);
+	} else {
+		CommitIndexBuffer(vk_buffer, index_binding);
+	}
 
 	SetGraphicsDynamicParams(buffer, vk_buffer, state.color_info, state.color_count,
 	                         state.depth_info);
@@ -1230,14 +1267,19 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (set_auto_debug) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
-	EmitDrawPrimitives(ucfg, vk_buffer, state.vs_input_info, draw, emit);
+	if (mesh_active) {
+		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+	} else {
+		EmitDrawPrimitives(ucfg, vk_buffer, state.vs_input_info, draw, emit);
+	}
 
 	if (set_auto_debug) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
 	}
 	vk::PipelineStageFlags shader_write_stages = {};
 	if (HasShaderBufferWrites(state.vs_input_info.stage)) {
-		shader_write_stages |= vk::PipelineStageFlagBits::eVertexShader;
+		shader_write_stages |= mesh_active ? vk::PipelineStageFlagBits::eMeshShaderEXT
+		                                   : vk::PipelineStageFlagBits::eVertexShader;
 	}
 	if (state.ps_active && HasShaderBufferWrites(state.ps_input_info.stage)) {
 		shader_write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
@@ -1277,10 +1319,6 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
-		return;
-	}
-
-	if (ShouldSkipGeShader(buffer)) {
 		return;
 	}
 
@@ -1409,10 +1447,6 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
-		return;
-	}
-
-	if (ShouldSkipGeShader(buffer)) {
 		return;
 	}
 

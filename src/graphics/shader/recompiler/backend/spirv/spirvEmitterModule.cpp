@@ -336,15 +336,8 @@ VertexInputScalarKind VertexParameterScalarKind(const EmitterState& state, uint3
 	}
 }
 
-uint32_t VertexParameterComponentCount(const EmitterState& state, const InputBinding& input) {
-	uint32_t count = input.component_count;
-	if (state.stage == ShaderType::Vertex && input.location < ShaderVertexInputInfo::RES_MAX &&
-	    input.location < static_cast<uint32_t>(state.input_info.vertex->resources_num) &&
-	    state.input_info.vertex->resources_dst[input.location].registers_num > 0) {
-		count = static_cast<uint32_t>(
-		    state.input_info.vertex->resources_dst[input.location].registers_num);
-	}
-	return std::clamp(count, 1u, 4u);
+uint32_t VertexParameterComponentCount(const InputBinding& input) {
+	return std::clamp(input.component_count, 1u, 4u);
 }
 
 uint32_t VertexParameterScalarType(EmitterState& state, VertexInputScalarKind kind) {
@@ -353,45 +346,6 @@ uint32_t VertexParameterScalarType(EmitterState& state, VertexInputScalarKind ki
 		case VertexInputScalarKind::Uint: return TypeU32(state);
 		case VertexInputScalarKind::Float:
 		default: return TypeF32(state);
-	}
-}
-
-uint32_t VertexParameterScalarPointerType(EmitterState& state, VertexInputScalarKind kind) {
-	switch (kind) {
-		case VertexInputScalarKind::Sint:
-			return TypePointer(state, StorageClassInput, TypeI32(state));
-		case VertexInputScalarKind::Uint:
-			return TypePointer(state, StorageClassInput, TypeU32(state));
-		case VertexInputScalarKind::Float:
-		default: return TypePointer(state, StorageClassInput, TypeF32(state));
-	}
-}
-
-uint32_t VertexParameterVectorOrScalarType(EmitterState& state, VertexInputScalarKind kind,
-                                           uint32_t components) {
-	switch (kind) {
-		case VertexInputScalarKind::Sint:
-			switch (components) {
-				case 1: return TypeI32(state);
-				case 2: return TypeI32Vector(state, 2);
-				case 3: return TypeI32Vector(state, 3);
-				default: return TypeI32Vector(state, 4);
-			}
-		case VertexInputScalarKind::Uint:
-			switch (components) {
-				case 1: return TypeU32(state);
-				case 2: return TypeU32Vector(state, 2);
-				case 3: return TypeU32Vector(state, 3);
-				default: return TypeU32Vector(state, 4);
-			}
-		case VertexInputScalarKind::Float:
-		default:
-			switch (components) {
-				case 1: return TypeF32(state);
-				case 2: return TypeF32Vector(state, 2);
-				case 3: return TypeF32Vector(state, 3);
-				default: return TypeF32Vector(state, 4);
-			}
 	}
 }
 
@@ -497,6 +451,10 @@ void AllocateOutputVariables(EmitterState& state) {
 			case IR::StageOutputKind::Layer:
 				binding.variable_id = AllocateSharedOutputVariable(state, state.layer_variable);
 				break;
+			case IR::StageOutputKind::ViewportIndex:
+				binding.variable_id =
+				    AllocateSharedOutputVariable(state, state.viewport_index_variable);
+				break;
 			case IR::StageOutputKind::Depth:
 				binding.variable_id = AllocateSharedOutputVariable(state, state.depth_variable);
 				break;
@@ -518,6 +476,8 @@ uint32_t BuiltInForInput(IR::StageInputKind kind) {
 		case IR::StageInputKind::InstanceIndex: return BuiltInInstanceIndex;
 		case IR::StageInputKind::FragCoord: return BuiltInFragCoord;
 		case IR::StageInputKind::FrontFacing: return BuiltInFrontFacing;
+		case IR::StageInputKind::Layer: return BuiltInLayer;
+		case IR::StageInputKind::SampleId: return BuiltInSampleId;
 		case IR::StageInputKind::BaryCoordSmooth: return BuiltInBaryCoordKHR;
 		case IR::StageInputKind::BaryCoordNoPerspective: return BuiltInBaryCoordNoPerspKHR;
 		case IR::StageInputKind::WorkgroupId: return BuiltInWorkgroupId;
@@ -541,6 +501,9 @@ void AddInputAnnotationsAndNames(EmitterState& state) {
 	}
 	for (const auto& input: state.inputs) {
 		state.builder.AddName(input.variable_id, input.debug_name.c_str());
+		if (input.kind == IR::StageInputKind::Layer || input.kind == IR::StageInputKind::SampleId) {
+			state.builder.AddAnnotation({OpDecorate, input.variable_id, DecorationFlat});
+		}
 		if (input.kind == IR::StageInputKind::Parameter) {
 			const auto flat = PixelParameterIsFlat(state, input.location);
 			if (input.per_vertex) {
@@ -585,6 +548,7 @@ void AddOutputAnnotationsAndNames(EmitterState& state) {
 	AddBuiltIn(state.clip_distance_variable, "gl_ClipDistance", BuiltInClipDistance);
 	AddBuiltIn(state.cull_distance_variable, "gl_CullDistance", BuiltInCullDistance);
 	AddBuiltIn(state.layer_variable, "gl_Layer", BuiltInLayer);
+	AddBuiltIn(state.viewport_index_variable, "gl_ViewportIndex", BuiltInViewportIndex);
 	if (state.depth_variable != 0) {
 		state.builder.AddName(state.depth_variable, "gl_FragDepth");
 		state.builder.AddAnnotation(
@@ -710,9 +674,16 @@ void DefineModule(EmitterState& state) {
 	if (state.cull_distance_variable != 0) {
 		state.builder.RequireCapability(CapabilityCullDistance);
 	}
-	if (state.layer_variable != 0) {
-		state.builder.RequireCapability(CapabilityShaderViewportIndexLayerEXT);
-		state.builder.RequireExtension("SPV_EXT_shader_viewport_index_layer");
+	if (state.layer_variable != 0 || InputVariableForKind(state, IR::StageInputKind::Layer) != 0) {
+		state.builder.RequireVersion(0x00010500u);
+		state.builder.RequireCapability(CapabilityShaderLayer);
+	}
+	if (state.viewport_index_variable != 0) {
+		state.builder.RequireVersion(0x00010500u);
+		state.builder.RequireCapability(CapabilityShaderViewportIndex);
+	}
+	if (InputVariableForKind(state, IR::StageInputKind::SampleId) != 0) {
+		state.builder.RequireCapability(CapabilitySampleRateShading);
 	}
 	if (state.requirements.image_gather_extended) {
 		state.builder.RequireCapability(CapabilityImageGatherExtended);
@@ -805,6 +776,8 @@ void DefineModule(EmitterState& state) {
 		switch (input.kind) {
 			case IR::StageInputKind::VertexIndex:
 			case IR::StageInputKind::InstanceIndex:
+			case IR::StageInputKind::Layer:
+			case IR::StageInputKind::SampleId:
 				ptr_type = TypePointer(state, StorageClassInput, TypeI32(state));
 				break;
 			case IR::StageInputKind::WorkgroupId:
@@ -825,7 +798,7 @@ void DefineModule(EmitterState& state) {
 			case IR::StageInputKind::Parameter:
 				if (state.stage == ShaderType::Vertex) {
 					const auto kind       = VertexParameterScalarKind(state, input.location);
-					const auto components = VertexParameterComponentCount(state, input);
+					const auto components = VertexParameterComponentCount(input);
 					ptr_type = VertexParameterInputPointerType(state, kind, components);
 				} else if (input.per_vertex) {
 					const auto array_type = state.builder.Type(
@@ -869,6 +842,11 @@ void DefineModule(EmitterState& state) {
 	if (state.layer_variable != 0) {
 		state.builder.DefineGlobalVariable(
 		    state.layer_variable, TypePointer(state, StorageClassOutput, TypeU32(state)),
+		    StorageClassOutput);
+	}
+	if (state.viewport_index_variable != 0) {
+		state.builder.DefineGlobalVariable(
+		    state.viewport_index_variable, TypePointer(state, StorageClassOutput, TypeU32(state)),
 		    StorageClassOutput);
 	}
 	for (const auto& binding: state.outputs) {

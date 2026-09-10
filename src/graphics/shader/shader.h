@@ -78,6 +78,25 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 	uint32_t max_vertices         = 0;
 	uint32_t max_primitives       = 0;
 	uint32_t provoking_vertex     = 0;
+
+	[[nodiscard]] constexpr uint32_t InputPrimitiveSize() const {
+		switch (static_cast<Prospero::PrimitiveType>(input_primitive)) {
+			case Prospero::PrimitiveType::kPointList: return 1u;
+			case Prospero::PrimitiveType::kLineList: return 2u;
+			default: return 3u;
+		}
+	}
+	[[nodiscard]] constexpr uint32_t InputPrimitiveStep() const {
+		return input_primitive == static_cast<uint32_t>(Prospero::PrimitiveType::kTriStrip)
+		           ? 1u : InputPrimitiveSize();
+	}
+	[[nodiscard]] constexpr uint32_t InputPrimitiveCount(uint32_t vertices) const {
+		const auto size = InputPrimitiveSize();
+		return vertices < size ? 0u : (vertices - size) / InputPrimitiveStep() + 1u;
+	}
+	[[nodiscard]] constexpr uint32_t InputVertexCount(uint32_t primitives) const {
+		return primitives == 0u ? 0u : (primitives - 1u) * InputPrimitiveStep() + InputPrimitiveSize();
+	}
 };
 
 struct ShaderVertexInputInfo {
@@ -88,7 +107,6 @@ struct ShaderVertexInputInfo {
 	ShaderVertexInputBuffer buffers[RES_MAX];
 	ShaderStageRuntime      stage;
 	int                     resources_num       = 0;
-	int                     fetch_shader_reg    = 0;
 	int                     fetch_attrib_reg    = 0;
 	int                     fetch_buffer_reg    = 0;
 	int                     buffers_num         = 0;
@@ -121,10 +139,10 @@ struct ShaderPixelInputInfo {
 	uint32_t                                       scratch_size_dwords          = 0;
 	bool                                           ps_pos_x                     = false;
 	bool                                           ps_pos_y                     = false;
-	bool                                           ps_pos_xy                    = false;
 	bool                                           ps_pos_z                     = false;
 	bool                                           ps_pos_w                     = false;
 	bool                                           ps_front_face                = false;
+	bool                                           ps_ancillary                 = false;
 	bool                                           ps_no_perspective            = false;
 	bool                                           ps_pixel_kill_enable         = false;
 	bool                                           ps_depth_export_enable       = false;
@@ -244,6 +262,7 @@ struct Shader {
 };
 
 struct ShaderMappedData {
+	Prospero::ShaderBinaryType type {};
 	ShaderUserData* user_data           = nullptr;
 	ShaderSemantic* input_semantics     = nullptr;
 	uint32_t        num_input_semantics = 0;

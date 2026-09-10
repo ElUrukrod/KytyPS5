@@ -202,6 +202,13 @@ struct RenderControl {
 	uint8_t copy_sample              = 0;
 };
 
+struct DepthRenderOverride {
+	bool force_z_valid       = false;
+	bool force_z_dirty       = false;
+	bool force_stencil_valid = false;
+	bool force_stencil_dirty = false;
+};
+
 struct GdsOaCounter {
 	uint32_t counter = 0;
 	uint32_t address = 0;
@@ -362,16 +369,16 @@ struct AaConfig {
 struct Viewport {
 	float zmin                                  = 0.0f;
 	float zmax                                  = 0.0f;
-	float xscale                                = 0.0f;
+	float xscale                                = 1.0f;
 	float xoffset                               = 0.0f;
-	float yscale                                = 0.0f;
+	float yscale                                = 1.0f;
 	float yoffset                               = 0.0f;
-	float zscale                                = 0.0f;
+	float zscale                                = 1.0f;
 	float zoffset                               = 0.0f;
 	int   viewport_scissor_left                 = 0;
 	int   viewport_scissor_top                  = 0;
-	int   viewport_scissor_right                = 0;
-	int   viewport_scissor_bottom               = 0;
+	int   viewport_scissor_right                = 16384;
+	int   viewport_scissor_bottom               = 16384;
 	bool  viewport_scissor_window_offset_enable = false;
 };
 
@@ -380,26 +387,26 @@ struct ScreenViewport {
 	uint32_t transform_control                    = 1087;
 	int      screen_scissor_left                  = 0;
 	int      screen_scissor_top                   = 0;
-	int      screen_scissor_right                 = 0;
-	int      screen_scissor_bottom                = 0;
+	int      screen_scissor_right                 = 16384;
+	int      screen_scissor_bottom                = 16384;
 	int      window_scissor_left                  = 0;
 	int      window_scissor_top                   = 0;
-	int      window_scissor_right                 = 0;
-	int      window_scissor_bottom                = 0;
+	int      window_scissor_right                 = 16384;
+	int      window_scissor_bottom                = 16384;
 	bool     window_scissor_window_offset_enable  = false;
 	int      generic_scissor_left                 = 0;
 	int      generic_scissor_top                  = 0;
-	int      generic_scissor_right                = 0;
-	int      generic_scissor_bottom               = 0;
+	int      generic_scissor_right                = 16384;
+	int      generic_scissor_bottom               = 16384;
 	bool     generic_scissor_window_offset_enable = false;
 	int      window_offset_x                      = 0;
 	int      window_offset_y                      = 0;
 	uint32_t hw_offset_x                          = 0;
 	uint32_t hw_offset_y                          = 0;
-	float    guard_band_horz_clip                 = 0.0f;
-	float    guard_band_vert_clip                 = 0.0f;
-	float    guard_band_horz_discard              = 0.0f;
-	float    guard_band_vert_discard              = 0.0f;
+	float    guard_band_horz_clip                 = 1.0f;
+	float    guard_band_vert_clip                 = 1.0f;
+	float    guard_band_horz_discard              = 1.0f;
+	float    guard_band_vert_discard              = 1.0f;
 	uint16_t clip_rect_rule                       = 0xffffu;
 	int      clip_rect_left[4]                    = {};
 	int      clip_rect_top[4]                     = {};
@@ -520,7 +527,8 @@ struct GsShaderResource2 {
 };
 
 struct GsStageRegisters {
-	uint64_t          data_addr = 0;
+	uint64_t          data_addr      = 0;
+	uint64_t          user_data_addr = 0;
 	GsShaderResource1 rsrc1;
 	GsShaderResource2 rsrc2;
 };
@@ -808,6 +816,12 @@ public:
 	void SetClipControl(const ClipControl& control) { m_clip_control = control; }
 	[[nodiscard]] const RenderControl& GetRenderControl() const { return m_render_control; }
 	void SetRenderControl(const RenderControl& control) { m_render_control = control; }
+	[[nodiscard]] const DepthRenderOverride& GetDepthRenderOverride() const {
+		return m_depth_render_override;
+	}
+	void SetDepthRenderOverride(const DepthRenderOverride& control) {
+		m_depth_render_override = control;
+	}
 	[[nodiscard]] const DepthControl& GetDepthControl() const { return m_depth_control; }
 	void SetDepthControl(const DepthControl& control) { m_depth_control = control; }
 	[[nodiscard]] const ModeControl& GetModeControl() const { return m_mode_control; }
@@ -903,15 +917,16 @@ private:
 
 	uint32_t m_shader_stages = 0;
 
-	DepthRenderTarget m_depth_render_target;
-	RenderControl     m_render_control;
-	DepthControl      m_depth_control;
-	StencilControl    m_stencil_control;
-	StencilMask       m_stencil_mask;
-	float             m_depth_clear_value   = 0.0f;
-	float             m_depth_bounds_min    = 0.0f;
-	float             m_depth_bounds_max    = 1.0f;
-	uint8_t           m_stencil_clear_value = 0;
+	DepthRenderTarget   m_depth_render_target;
+	RenderControl       m_render_control;
+	DepthRenderOverride m_depth_render_override;
+	DepthControl        m_depth_control;
+	StencilControl      m_stencil_control;
+	StencilMask         m_stencil_mask;
+	float               m_depth_clear_value   = 0.0f;
+	float               m_depth_bounds_min    = 0.0f;
+	float               m_depth_bounds_max    = 1.0f;
+	uint8_t             m_stencil_clear_value = 0;
 
 	ModeControl m_mode_control;
 	PolyOffset  m_poly_offset;
@@ -976,6 +991,12 @@ public:
 	void SetHsShaderResource1(const HsShaderResource1& rsrc1) { m_vs.hs_regs.rsrc1 = rsrc1; }
 	void SetHsShaderResource2(const HsShaderResource2& rsrc2) { m_vs.hs_regs.rsrc2 = rsrc2; }
 	void SetGsShaderBase(uint64_t addr) { m_vs.gs_regs.data_addr = addr; }
+	void SetGsUserDataAddress(uint32_t word, uint32_t value) {
+		const auto shift   = word * 32u;
+		auto&      address = m_vs.gs_regs.user_data_addr;
+		address = (address & ~(uint64_t {0xffffffffu} << shift)) |
+		          (static_cast<uint64_t>(value) << shift);
+	}
 	void SetGsShaderResource1(const GsShaderResource1& rsrc1) { m_vs.gs_regs.rsrc1 = rsrc1; }
 	void SetGsShaderResource2(const GsShaderResource2& rsrc2) { m_vs.gs_regs.rsrc2 = rsrc2; }
 

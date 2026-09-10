@@ -117,7 +117,7 @@ static ShaderParams GetShaderParams(uint64_t shader_addr, const char* label, uin
 	const auto code = std::span {reinterpret_cast<const uint32_t*>(shader_addr), code_words};
 	return {
 	    .code      = code,
-	    .user_data = user_data,
+	    .user_data = std::vector<uint32_t>(user_data.begin(), user_data.end()),
 	    .hash      = declared_hash != 0 ? declared_hash
 	                                    : XXH3_64bits(code.data(), code.size_bytes()),
 	};
@@ -375,113 +375,6 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 	}
 }
 
-static Prospero::BufferFormat
-VertexAttribFormatToBufferFormat(Prospero::VertexAttribFormat format) {
-	struct FormatMap {
-		Prospero::VertexAttribFormat vertex;
-		Prospero::BufferFormat       buffer;
-	};
-
-	static constexpr FormatMap format_map[] = {
-	    {Prospero::VertexAttribFormat::kInvalid, Prospero::BufferFormat::kInvalid},
-	    {Prospero::VertexAttribFormat::k8UNorm, Prospero::BufferFormat::k8UNorm},
-	    {Prospero::VertexAttribFormat::k8SNorm, Prospero::BufferFormat::k8SNorm},
-	    {Prospero::VertexAttribFormat::k8UScaled, Prospero::BufferFormat::k8UScaled},
-	    {Prospero::VertexAttribFormat::k8SScaled, Prospero::BufferFormat::k8SScaled},
-	    {Prospero::VertexAttribFormat::k8UInt, Prospero::BufferFormat::k8UInt},
-	    {Prospero::VertexAttribFormat::k8SInt, Prospero::BufferFormat::k8SInt},
-	    {Prospero::VertexAttribFormat::k16UNorm, Prospero::BufferFormat::k16UNorm},
-	    {Prospero::VertexAttribFormat::k16SNorm, Prospero::BufferFormat::k16SNorm},
-	    {Prospero::VertexAttribFormat::k16UScaled, Prospero::BufferFormat::k16UScaled},
-	    {Prospero::VertexAttribFormat::k16SScaled, Prospero::BufferFormat::k16SScaled},
-	    {Prospero::VertexAttribFormat::k16UInt, Prospero::BufferFormat::k16UInt},
-	    {Prospero::VertexAttribFormat::k16SInt, Prospero::BufferFormat::k16SInt},
-	    {Prospero::VertexAttribFormat::k16Float, Prospero::BufferFormat::k16Float},
-	    {Prospero::VertexAttribFormat::k8_8UNorm, Prospero::BufferFormat::k8_8UNorm},
-	    {Prospero::VertexAttribFormat::k8_8SNorm, Prospero::BufferFormat::k8_8SNorm},
-	    {Prospero::VertexAttribFormat::k8_8UScaled, Prospero::BufferFormat::k8_8UScaled},
-	    {Prospero::VertexAttribFormat::k8_8SScaled, Prospero::BufferFormat::k8_8SScaled},
-	    {Prospero::VertexAttribFormat::k8_8UInt, Prospero::BufferFormat::k8_8UInt},
-	    {Prospero::VertexAttribFormat::k8_8SInt, Prospero::BufferFormat::k8_8SInt},
-	    {Prospero::VertexAttribFormat::k32UInt, Prospero::BufferFormat::k32UInt},
-	    {Prospero::VertexAttribFormat::k32SInt, Prospero::BufferFormat::k32SInt},
-	    {Prospero::VertexAttribFormat::k32Float, Prospero::BufferFormat::k32Float},
-	    {Prospero::VertexAttribFormat::k16_16UNorm, Prospero::BufferFormat::k16_16UNorm},
-	    {Prospero::VertexAttribFormat::k16_16SNorm, Prospero::BufferFormat::k16_16SNorm},
-	    {Prospero::VertexAttribFormat::k16_16UScaled, Prospero::BufferFormat::k16_16UScaled},
-	    {Prospero::VertexAttribFormat::k16_16SScaled, Prospero::BufferFormat::k16_16SScaled},
-	    {Prospero::VertexAttribFormat::k16_16UInt, Prospero::BufferFormat::k16_16UInt},
-	    {Prospero::VertexAttribFormat::k16_16SInt, Prospero::BufferFormat::k16_16SInt},
-	    {Prospero::VertexAttribFormat::k16_16Float, Prospero::BufferFormat::k16_16Float},
-	    {Prospero::VertexAttribFormat::k11_11_10UNorm, Prospero::BufferFormat::k11_11_10UNorm},
-	    {Prospero::VertexAttribFormat::k11_11_10SNorm, Prospero::BufferFormat::k11_11_10SNorm},
-	    {Prospero::VertexAttribFormat::k11_11_10UScaled, Prospero::BufferFormat::k11_11_10UScaled},
-	    {Prospero::VertexAttribFormat::k11_11_10SScaled, Prospero::BufferFormat::k11_11_10SScaled},
-	    {Prospero::VertexAttribFormat::k11_11_10UInt, Prospero::BufferFormat::k11_11_10UInt},
-	    {Prospero::VertexAttribFormat::k11_11_10SInt, Prospero::BufferFormat::k11_11_10SInt},
-	    {Prospero::VertexAttribFormat::k11_11_10Float, Prospero::BufferFormat::k11_11_10Float},
-	    {Prospero::VertexAttribFormat::k10_11_11UNorm, Prospero::BufferFormat::k10_11_11UNorm},
-	    {Prospero::VertexAttribFormat::k10_11_11SNorm, Prospero::BufferFormat::k10_11_11SNorm},
-	    {Prospero::VertexAttribFormat::k10_11_11UScaled, Prospero::BufferFormat::k10_11_11UScaled},
-	    {Prospero::VertexAttribFormat::k10_11_11SScaled, Prospero::BufferFormat::k10_11_11SScaled},
-	    {Prospero::VertexAttribFormat::k10_11_11UInt, Prospero::BufferFormat::k10_11_11UInt},
-	    {Prospero::VertexAttribFormat::k10_11_11SInt, Prospero::BufferFormat::k10_11_11SInt},
-	    {Prospero::VertexAttribFormat::k10_11_11Float, Prospero::BufferFormat::k10_11_11Float},
-	    {Prospero::VertexAttribFormat::k2_10_10_10UNorm, Prospero::BufferFormat::k2_10_10_10UNorm},
-	    {Prospero::VertexAttribFormat::k2_10_10_10SNorm, Prospero::BufferFormat::k2_10_10_10SNorm},
-	    {Prospero::VertexAttribFormat::k2_10_10_10UScaled,
-	     Prospero::BufferFormat::k2_10_10_10UScaled},
-	    {Prospero::VertexAttribFormat::k2_10_10_10SScaled,
-	     Prospero::BufferFormat::k2_10_10_10SScaled},
-	    {Prospero::VertexAttribFormat::k2_10_10_10UInt, Prospero::BufferFormat::k2_10_10_10UInt},
-	    {Prospero::VertexAttribFormat::k2_10_10_10SInt, Prospero::BufferFormat::k2_10_10_10SInt},
-	    {Prospero::VertexAttribFormat::k10_10_10_2UNorm, Prospero::BufferFormat::k10_10_10_2UNorm},
-	    {Prospero::VertexAttribFormat::k10_10_10_2SNorm, Prospero::BufferFormat::k10_10_10_2SNorm},
-	    {Prospero::VertexAttribFormat::k10_10_10_2UScaled,
-	     Prospero::BufferFormat::k10_10_10_2UScaled},
-	    {Prospero::VertexAttribFormat::k10_10_10_2SScaled,
-	     Prospero::BufferFormat::k10_10_10_2SScaled},
-	    {Prospero::VertexAttribFormat::k10_10_10_2UInt, Prospero::BufferFormat::k10_10_10_2UInt},
-	    {Prospero::VertexAttribFormat::k10_10_10_2SInt, Prospero::BufferFormat::k10_10_10_2SInt},
-	    {Prospero::VertexAttribFormat::k8_8_8_8UNorm, Prospero::BufferFormat::k8_8_8_8UNorm},
-	    {Prospero::VertexAttribFormat::k8_8_8_8SNorm, Prospero::BufferFormat::k8_8_8_8SNorm},
-	    {Prospero::VertexAttribFormat::k8_8_8_8UScaled, Prospero::BufferFormat::k8_8_8_8UScaled},
-	    {Prospero::VertexAttribFormat::k8_8_8_8SScaled, Prospero::BufferFormat::k8_8_8_8SScaled},
-	    {Prospero::VertexAttribFormat::k8_8_8_8UInt, Prospero::BufferFormat::k8_8_8_8UInt},
-	    {Prospero::VertexAttribFormat::k8_8_8_8SInt, Prospero::BufferFormat::k8_8_8_8SInt},
-	    {Prospero::VertexAttribFormat::k32_32UInt, Prospero::BufferFormat::k32_32UInt},
-	    {Prospero::VertexAttribFormat::k32_32SInt, Prospero::BufferFormat::k32_32SInt},
-	    {Prospero::VertexAttribFormat::k32_32Float, Prospero::BufferFormat::k32_32Float},
-	    {Prospero::VertexAttribFormat::k16_16_16_16UNorm,
-	     Prospero::BufferFormat::k16_16_16_16UNorm},
-	    {Prospero::VertexAttribFormat::k16_16_16_16SNorm,
-	     Prospero::BufferFormat::k16_16_16_16SNorm},
-	    {Prospero::VertexAttribFormat::k16_16_16_16UScaled,
-	     Prospero::BufferFormat::k16_16_16_16UScaled},
-	    {Prospero::VertexAttribFormat::k16_16_16_16SScaled,
-	     Prospero::BufferFormat::k16_16_16_16SScaled},
-	    {Prospero::VertexAttribFormat::k16_16_16_16UInt, Prospero::BufferFormat::k16_16_16_16UInt},
-	    {Prospero::VertexAttribFormat::k16_16_16_16SInt, Prospero::BufferFormat::k16_16_16_16SInt},
-	    {Prospero::VertexAttribFormat::k16_16_16_16Float,
-	     Prospero::BufferFormat::k16_16_16_16Float},
-	    {Prospero::VertexAttribFormat::k32_32_32UInt, Prospero::BufferFormat::k32_32_32UInt},
-	    {Prospero::VertexAttribFormat::k32_32_32SInt, Prospero::BufferFormat::k32_32_32SInt},
-	    {Prospero::VertexAttribFormat::k32_32_32Float, Prospero::BufferFormat::k32_32_32Float},
-	    {Prospero::VertexAttribFormat::k32_32_32_32UInt, Prospero::BufferFormat::k32_32_32_32UInt},
-	    {Prospero::VertexAttribFormat::k32_32_32_32SInt, Prospero::BufferFormat::k32_32_32_32SInt},
-	    {Prospero::VertexAttribFormat::k32_32_32_32Float,
-	     Prospero::BufferFormat::k32_32_32_32Float},
-	};
-
-	for (const auto& entry: format_map) {
-		if (format == entry.vertex) {
-			return entry.buffer;
-		}
-	}
-
-	return static_cast<Prospero::BufferFormat>(static_cast<uint32_t>(format));
-}
-
 static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
                                        const ShaderSemantic*  input_semantics,
                                        uint32_t num_input_semantics, const uint32_t* attrib,
@@ -536,18 +429,23 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		r.fields[2]       = sharp[2];
 		r.fields[3]       = sharp[3];
 		if (format != Prospero::VertexAttribFormat::kInvalid) {
-			auto                         buffer_format = VertexAttribFormatToBufferFormat(format);
-			static std::atomic<uint64_t> log_count     = 0;
-			auto                         log_id        = log_count.fetch_add(1);
+			const auto                   format_raw    = static_cast<uint32_t>(format);
+			const auto                   buffer_format = format_raw >> 2u;
+			const auto                   channels      = (format_raw & 3u) + 1u;
+			static std::atomic<uint64_t> log_count      = 0;
+			auto                         log_id         = log_count.fetch_add(1);
 			if (log_id < 64) {
-				LOGF("\t temporary: PS5 vertex attrib semantic %u uses attrib format %u -> buffer "
+				LOGF("\t PS5 vertex attrib semantic %u uses attrib format %u -> buffer "
 				     "format %u, offset %u, buffer index %zu\n",
 				     static_cast<uint32_t>(in.semantic), static_cast<uint32_t>(format),
 				     static_cast<uint32_t>(buffer_format), offset, index);
 			}
-			const auto buffer_format_raw = static_cast<uint32_t>(buffer_format);
+			// AGC vertex formats encode the buffer format above the two channel-count bits.
+			// The fetch prolog selects X001, XY01, XYZ1, or XYZW from that count.
 			r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) |
-			              ((buffer_format_raw & 0x7fu) << 12u) | DstSel(4, 5, 6, 7);
+			              (buffer_format << 12u) |
+			              DstSel(4, channels > 1u ? 5u : 0u, channels > 2u ? 6u : 0u,
+			                     channels > 3u ? 7u : 1u);
 		}
 		if (offset != 0) {
 			r.UpdateAddress48(r.Base48() + offset);
@@ -695,10 +593,10 @@ static void ShaderGetStaticInputInfoPS(
 	}
 	ps_info.ps_pos_x                     = (active_inputs & 0x00000100u) != 0;
 	ps_info.ps_pos_y                     = (active_inputs & 0x00000200u) != 0;
-	ps_info.ps_pos_xy                    = ps_info.ps_pos_x && ps_info.ps_pos_y;
 	ps_info.ps_pos_z                     = (active_inputs & 0x00000400u) != 0;
 	ps_info.ps_pos_w                     = (active_inputs & 0x00000800u) != 0;
 	ps_info.ps_front_face                = (active_inputs & 0x00001000u) != 0;
+	ps_info.ps_ancillary                 = (active_inputs & 0x00002000u) != 0;
 	ps_info.ps_sample_shading            = (active_inputs & 0x00000011u) != 0;
 	ps_info.ps_no_perspective            = (sh.ps_input_ena & sh.ps_input_addr & 0x00000020u) != 0;
 	ps_info.ps_pixel_kill_enable         = sh.db_shader_control.shader_kill_enable;
@@ -808,6 +706,7 @@ void BuildStageStaticKey(const ShaderPixelInputInfo& info, std::vector<uint32_t>
 	key.push_back(static_cast<uint32_t>(info.ps_pos_z));
 	key.push_back(static_cast<uint32_t>(info.ps_pos_w));
 	key.push_back(static_cast<uint32_t>(info.ps_front_face));
+	key.push_back(static_cast<uint32_t>(info.ps_ancillary));
 	key.push_back(static_cast<uint32_t>(info.ps_no_perspective));
 	key.push_back(static_cast<uint32_t>(info.ps_pixel_kill_enable));
 	key.push_back(static_cast<uint32_t>(info.ps_depth_export_enable));
@@ -856,14 +755,9 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 		}
 		return params;
 	}
-	EXIT_IF(regs.gs_regs.data_addr == 0);
-	const auto back = ShaderGetMappedData(regs.gs_regs.data_addr, "ShaderGetInputInfoGS():");
-	const auto back_params =
-	    GetShaderParams(regs.gs_regs.data_addr, "ShaderRecompiler GS",
-	                    GetDeclaredShaderHash(regs.gs_regs.data_addr), {}, back);
-	params.back_code         = back_params.code;
-	const uint64_t hashes[]  = {params.hash, back_params.hash};
-	params.hash              = XXH3_64bits(hashes, sizeof(hashes));
+	// NGG user SGPRs start at s8; a separately compiled GS back half also receives
+	// its user-data pointer in s0:s1.
+	params.user_data.insert(params.user_data.begin(), 8u, 0u);
 	info                     = {};
 	info.pa_cl_vs_out_cntl   = sh.m_paClVsOutCntl;
 	auto& mesh               = info.mesh;
@@ -872,12 +766,29 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	mesh.max_vertices        = sh.m_geMaxOutputPerSubgroup;
 	mesh.provoking_vertex    = context.GetModeControl().provoking_vtx_last ? 2u : 0u;
 	mesh.lds_size_dwords     = static_cast<uint32_t>(regs.gs_regs.rsrc2.lds_size) * 128u;
-	mesh.scratch_size_dwords = std::max(data.scratch_size_dwords, back.scratch_size_dwords);
+	mesh.scratch_size_dwords = data.scratch_size_dwords;
+	if (data.type == Prospero::ShaderBinaryType::kGsFront) {
+		EXIT_IF(regs.gs_regs.data_addr == 0);
+		const auto back = ShaderGetMappedData(regs.gs_regs.data_addr, "ShaderGetInputInfoGS():");
+		const auto back_params =
+		    GetShaderParams(regs.gs_regs.data_addr, "ShaderRecompiler GS",
+		                    GetDeclaredShaderHash(regs.gs_regs.data_addr), {}, back);
+		params.back_code = back_params.code;
+		params.user_data[0] = static_cast<uint32_t>(regs.gs_regs.user_data_addr);
+		params.user_data[1] = static_cast<uint32_t>(regs.gs_regs.user_data_addr >> 32u);
+		const uint64_t hashes[] = {params.hash, back_params.hash};
+		params.hash = XXH3_64bits(hashes, sizeof(hashes));
+		mesh.scratch_size_dwords = std::max(mesh.scratch_size_dwords, back.scratch_size_dwords);
+	}
 	EXIT_NOT_IMPLEMENTED(regs.gs_regs.rsrc1.gs_vgpr_component_count != 3u ||
 	                     regs.gs_regs.rsrc2.es_vgpr_component_count != 3u);
 	const auto& group = user_config.GetGeControl();
-	if (user_config.GetPrimType() != Prospero::PrimitiveType::kTriStrip ||
-	    sh.m_vgtGsOutPrimType != 2u || sh.m_vgtGsMaxVertOut < 3u || group.vertex_group_size < 3u ||
+	if ((user_config.GetPrimType() != Prospero::PrimitiveType::kPointList &&
+	     user_config.GetPrimType() != Prospero::PrimitiveType::kLineList &&
+	     user_config.GetPrimType() != Prospero::PrimitiveType::kTriStrip &&
+	     user_config.GetPrimType() != Prospero::PrimitiveType::kTriList) ||
+	    sh.m_vgtGsOutPrimType != 2u || sh.m_vgtGsMaxVertOut < 3u ||
+	    group.vertex_group_size < mesh.InputPrimitiveSize() ||
 	    mesh.max_vertices == 0u) {
 		EXIT("unsupported GS assembly: input=%u output=%u vertices=%u GE=%u/%u max_output=%u\n",
 		     mesh.input_primitive, sh.m_vgtGsOutPrimType, sh.m_vgtGsMaxVertOut,
@@ -885,10 +796,10 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	}
 	mesh.max_primitives       = group.primitive_group_size * (sh.m_vgtGsMaxVertOut - 2u);
 	mesh.primitives_per_group = std::min({static_cast<uint32_t>(group.primitive_group_size),
-	                                      static_cast<uint32_t>(group.vertex_group_size) - 2u,
+	                                      mesh.InputPrimitiveCount(group.vertex_group_size),
 	                                      mesh.max_vertices / sh.m_vgtGsMaxVertOut});
 	EXIT_IF(mesh.primitives_per_group == 0u);
-	mesh.vertices_per_group = mesh.primitives_per_group + 2u;
+	mesh.vertices_per_group = mesh.InputVertexCount(mesh.primitives_per_group);
 	mesh.threads_num[0] =
 	    ((mesh.max_vertices + mesh.wave_size - 1u) / mesh.wave_size) * mesh.wave_size;
 	mesh.threads_num[1] = mesh.threads_num[2] = 1u;
@@ -985,6 +896,7 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo& info) {
 	     "\t ps_pos_z             = %s\n"
 	     "\t ps_pos_w             = %s\n"
 	     "\t ps_front_face        = %s\n"
+	     "\t ps_ancillary         = %s\n"
 	     "\t ps_sample_shading    = %s\n"
 	     "\t ps_no_perspective    = %s\n"
 	     "\t ps_pixel_kill_enable = %s\n"
@@ -994,6 +906,7 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo& info) {
 	     info.ps_perspective_center_vgpr, info.ps_pos_x ? "true" : "false",
 	     info.ps_pos_y ? "true" : "false", info.ps_pos_z ? "true" : "false",
 	     info.ps_pos_w ? "true" : "false", info.ps_front_face ? "true" : "false",
+	     info.ps_ancillary ? "true" : "false",
 	     info.ps_sample_shading ? "true" : "false", info.ps_no_perspective ? "true" : "false",
 	     info.ps_pixel_kill_enable ? "true" : "false", info.ps_early_z ? "true" : "false",
 	     info.ps_execute_on_noop ? "true" : "false");

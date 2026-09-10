@@ -12,7 +12,8 @@ bool Translator::EmitScalar(const Decoder::Instruction& inst) {
 		case O::S_GETPC_B64: S_GETPC_B64(inst); return true;
 		case O::S_SETPC_B64: return true;
 		case O::S_CSELECT_B32: S_CSELECT_B32(inst); return true;
-		case O::S_CSELECT_B64: S_CSELECT_B64(inst); return true;
+		case O::S_CSELECT_B64: ScalarSelect64(inst, inst.src1); return true;
+		case O::S_CMOV_B64: ScalarSelect64(inst, inst.dst); return true;
 		case O::S_SETREG_B32: EmitControlNop(); return true;
 		case O::S_WAITCNT: EmitWaitcnt(); return true;
 
@@ -21,6 +22,9 @@ bool Translator::EmitScalar(const Decoder::Instruction& inst) {
 			return true;
 		case O::S_ANDN1_SAVEEXEC_B32:
 			S_SAVEEXEC(inst, IR::ValueOpcode::LogicalAnd, false, true, false);
+			return true;
+		case O::S_ORN2_SAVEEXEC_B32:
+			S_SAVEEXEC(inst, IR::ValueOpcode::LogicalOr, true, false, false);
 			return true;
 		case O::S_AND_SAVEEXEC_B64:
 			S_SAVEEXEC(inst, IR::ValueOpcode::LogicalAnd, false, false, true);

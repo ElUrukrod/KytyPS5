@@ -19,6 +19,7 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -36,6 +37,28 @@
 namespace Libs::Graphics {
 
 namespace {
+
+vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front, bool cull_back) {
+	// CxPrimitiveSetup::PolygonMode disables both per-face modes when it is zero.
+	if (mode.poly_mode == 0) {
+		return vk::PolygonMode::eFill;
+	}
+	EXIT_NOT_IMPLEMENTED(mode.poly_mode != 1);
+	if (cull_front && cull_back) {
+		return vk::PolygonMode::eFill;
+	}
+	if (!cull_front && !cull_back && mode.polymode_front_ptype != mode.polymode_back_ptype) {
+		EXIT("Pipeline: different polygon modes for two visible faces are unsupported\n");
+	}
+	// Vulkan has one polygon mode. A culled face does not constrain that mode.
+	const auto polygon_mode = cull_front ? mode.polymode_back_ptype : mode.polymode_front_ptype;
+	switch (polygon_mode) {
+		case 0: return vk::PolygonMode::ePoint;
+		case 1: return vk::PolygonMode::eLine;
+		case 2: return vk::PolygonMode::eFill;
+		default: EXIT("Pipeline: invalid polygon mode %u\n", polygon_mode);
+	}
+}
 
 std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties) {
 	constexpr char hex[] = "0123456789abcdef";
@@ -228,7 +251,6 @@ struct PipelineCache::ProgramCache {
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 
 		vk::ShaderModuleCreateInfo create_info {};
-		create_info.sType       = vk::StructureType::eShaderModuleCreateInfo;
 		create_info.codeSize    = result.spirv.size() * sizeof(uint32_t);
 		create_info.pCode       = result.spirv.data();
 		vk::ShaderModule module = nullptr;
@@ -325,6 +347,7 @@ struct PipelineCache::ProgramCache {
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			options.user_data_base = 8;
 			if (stage == ShaderType::Mesh) {
+				options.user_data_base = 0;
 				options.wave_size      = input_info.mesh.wave_size;
 				options.scratch_dwords = input_info.mesh.scratch_size_dwords;
 			}
@@ -344,7 +367,16 @@ struct PipelineCache::ProgramCache {
 		input_info.stage = {.program = &permutation.program, .resources = std::move(resources)};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
 
-		std::printf("Num compiled %u shaders\n", ++num_compiled);
+		std::array<size_t, static_cast<size_t>(ShaderType::Mesh) + 1> counts {};
+		for (const auto& [key, source]: programs) {
+			counts[static_cast<size_t>(key.stage)] += source.permutations.size();
+		}
+		// Guest geometry shaders are compiled through the host mesh stage.
+		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu\n",
+		            counts[static_cast<size_t>(ShaderType::Vertex)],
+		            counts[static_cast<size_t>(ShaderType::Pixel)],
+		            counts[static_cast<size_t>(ShaderType::Compute)],
+		            counts[static_cast<size_t>(ShaderType::Mesh)]);
 		return permutation.handle;
 	}
 
@@ -363,7 +395,6 @@ struct PipelineCache::ProgramCache {
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	ProgramKey                                                  lookup_key;
 	vk::Device                                                  device;
-	uint32_t                                                    num_compiled   = 0;
 	uint64_t                                                    next_shader_id = 0;
 };
 
@@ -452,20 +483,19 @@ void PipelineCache::InitializeDriverCache() {
 	}
 
 	vk::PipelineCacheCreateInfo create {};
-	create.sType           = vk::StructureType::ePipelineCacheCreateInfo;
 	create.initialDataSize = initial_data.size();
 	create.pInitialData    = initial_data.empty() ? nullptr : initial_data.data();
 	auto result = m_graphics.device.createPipelineCache(&create, nullptr, &m_driver_cache);
 	if (result != vk::Result::eSuccess && !initial_data.empty()) {
 		PipelineCacheLog("Vulkan pipeline cache: driver rejected {} ({}); starting empty", path,
-		                 VulkanToString(result));
+		                 vk::to_string(result));
 		initial_data.clear();
 		create.initialDataSize = 0;
 		create.pInitialData    = nullptr;
 		result = m_graphics.device.createPipelineCache(&create, nullptr, &m_driver_cache);
 	}
 	if (result != vk::Result::eSuccess) {
-		PipelineCacheLog("Vulkan pipeline cache: disabled ({})", VulkanToString(result));
+		PipelineCacheLog("Vulkan pipeline cache: disabled ({})", vk::to_string(result));
 		m_driver_cache = nullptr;
 		return;
 	}
@@ -502,7 +532,7 @@ void PipelineCache::Save() {
 	if (result != vk::Result::eSuccess || size == 0 ||
 	    size > std::numeric_limits<uint32_t>::max()) {
 		PipelineCacheLog("Vulkan pipeline cache: save failed ({}, {} bytes)",
-		                 VulkanToString(result), size);
+		                 vk::to_string(result), size);
 		return;
 	}
 	payload.resize(size);
@@ -593,7 +623,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                const HW::ShaderRegisters&   sh,
                                                ShaderComputeInputInfo&      input_info) {
-	input_info.host_subgroup_size = m_graphics.compute_wave64_supported ? 64u : 32u;
+	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
 	Common::LockGuard lock(m_mutex);
 	uint32_t          push_data_cursor = 0;
@@ -604,7 +634,7 @@ bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other)
 	return std::memcmp(this, &other, sizeof(*this)) == 0;
 }
 
-PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
+PipelineCache::Pipeline& PipelineCache::CreateGraphicsPipeline(
     std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
     const ShaderVertexInputInfo& vs_input_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
@@ -621,50 +651,45 @@ PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
 	Common::LockGuard lock(m_mutex);
 	auto&             ctx = command.GetRegisters();
 
-	uint32_t color_mask[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	for (uint32_t i = 0; i < color_count; i++) {
-		color_mask[i] =
-		    (colors[i].image_id ? colors[i].export_mapping.ApplyMask(render_target_mask_slot(
-		                              ctx.GetRenderTargetMask(), colors[i].target_slot))
-		                        : 0);
-	}
 	const HW::ModeControl& mc = ctx.GetModeControl();
 
 	const auto vs_id = vertex_program.id;
 	const auto ps_id = ps_active ? pixel_program.id : 0;
 
-	PipelineStaticParameters static_params {};
-	GraphicsPipeline         p {};
-	p.ps_shader_id = ps_id;
-	p.vs_shader_id = vs_id;
-
-	static_params.color_count = color_count;
-	PipelineRenderingState rendering {};
+	GraphicsPipelineKey key {};
+	key.vs_shader_id            = vs_id;
+	key.ps_shader_id            = ps_id;
+	auto& static_params         = key.static_params;
+	auto& rendering             = key.rendering;
 	rendering.color_count       = color_count;
 	uint32_t attachment_samples = 0;
 	for (uint32_t i = 0; i < color_count; i++) {
-		EXIT_IF(!colors[i].image_id || colors[i].format == vk::Format::eUndefined);
-		rendering.color_formats[i] = colors[i].format;
+		EXIT_IF(!colors[i].image_id || colors[i].desc.view_info.format == vk::Format::eUndefined);
+		static_params.color_mask[i] = colors[i].export_mapping.ApplyMask(
+		    render_target_mask_slot(ctx.GetRenderTargetMask(), colors[i].target_slot));
+		rendering.color_formats[i] = colors[i].desc.view_info.format;
 		if (attachment_samples == 0) {
-			attachment_samples = colors[i].samples;
-		} else if (attachment_samples != colors[i].samples) {
+			attachment_samples = colors[i].desc.info.samples;
+		} else if (attachment_samples != colors[i].desc.info.samples) {
 			EXIT("mixed color attachment sample counts are unsupported: %u and %u\n",
-			     attachment_samples, colors[i].samples);
+			     attachment_samples, colors[i].desc.info.samples);
 		}
 	}
 	const bool with_depth =
-	    depth.format != vk::Format::eUndefined && static_cast<bool>(depth.image_id);
+	    depth.desc.view_info.format != vk::Format::eUndefined && static_cast<bool>(depth.image_id);
 	if (with_depth) {
-		const auto aspects = ImageViewOps::DepthAspectMask(depth.format);
-		rendering.depth_format =
-		    aspects & vk::ImageAspectFlagBits::eDepth ? depth.format : vk::Format::eUndefined;
-		rendering.stencil_format =
-		    aspects & vk::ImageAspectFlagBits::eStencil ? depth.format : vk::Format::eUndefined;
+		const auto aspects       = ImageViewOps::DepthAspectMask(depth.desc.view_info.format);
+		rendering.depth_format   = aspects & vk::ImageAspectFlagBits::eDepth
+		                               ? depth.desc.view_info.format
+		                               : vk::Format::eUndefined;
+		rendering.stencil_format = aspects & vk::ImageAspectFlagBits::eStencil
+		                               ? depth.desc.view_info.format
+		                               : vk::Format::eUndefined;
 		if (attachment_samples == 0) {
-			attachment_samples = depth.samples;
-		} else if (attachment_samples != depth.samples) {
+			attachment_samples = depth.desc.info.samples;
+		} else if (attachment_samples != depth.desc.info.samples) {
 			EXIT("mixed color/depth sample counts are unsupported: %u and %u\n", attachment_samples,
-			     depth.samples);
+			     depth.desc.info.samples);
 		}
 	}
 	if (color_count == 0 && !with_depth) {
@@ -694,20 +719,19 @@ PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
 	if (static_params.sample_shading_enable && !m_graphics.sample_rate_shading_enabled) {
 		EXIT("Pipeline: sample-rate shading is required but unsupported by the host\n");
 	}
-	static_params.with_depth              = with_depth;
 	static_params.depth_bounds_test_enable = depth.depth_bounds_test_enable;
 	static_params.depth_min_bounds         = depth.depth_min_bounds;
 	static_params.depth_max_bounds         = depth.depth_max_bounds;
 	static_params.stencil_test_enable      = depth.stencil_test_enable;
 	static_params.stencil_front            = depth.stencil_static_front;
 	static_params.stencil_back             = depth.stencil_static_back;
-	for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
-		static_params.color_mask[i] = color_mask[i];
-	}
 	const bool rect_list     = topology == vk::PrimitiveTopology::ePatchList;
 	static_params.cull_back  = !rect_list && mc.cull_back;
 	static_params.cull_front = !rect_list && mc.cull_front;
 	static_params.face       = mc.face;
+	static_params.provoking_vtx_last = mc.provoking_vtx_last;
+	static_params.polygon_mode =
+	    ResolvePolygonMode(mc, static_params.cull_front, static_params.cull_back);
 
 	for (uint32_t i = 0; i < color_count; i++) {
 		const auto& rt                        = ctx.GetRenderTarget(colors[i].target_slot);
@@ -722,11 +746,6 @@ PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
 		static_params.blend_enable[i]         = bc.enable;
 		static_params.blend_bypass[i]         = rt.info.blend_bypass;
 	}
-	GraphicsPipelineKey key {};
-	key.rendering     = rendering;
-	key.vs_shader_id  = p.vs_shader_id;
-	key.ps_shader_id  = p.ps_shader_id;
-	key.static_params = static_params;
 	if (vs_input_info.stage.program->stage != ShaderType::Mesh) {
 		EXIT_IF(vs_input_info.buffers_num < 0 ||
 		        vs_input_info.buffers_num > ShaderVertexInputInfo::RES_MAX ||
@@ -768,11 +787,11 @@ PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
 		     static_cast<void*>(pixel_program.module));
 	}
 
-	auto cached = std::make_unique<GraphicsPipeline>(p);
+	auto cached = std::make_unique<Pipeline>();
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
 	CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vs_input_info,
-	                       vertex_program.module, ps_input_info, pixel_program.module,
-	                       static_params, m_driver_cache);
+	                       vertex_program, ps_input_info, pixel_program, static_params,
+	                       m_driver_cache);
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
@@ -784,22 +803,17 @@ PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
 	return *iter->second;
 }
 
-PipelineCache::ComputePipeline&
-PipelineCache::CreateComputePipeline(ShaderComputeInputInfo& input_info,
-                                     const ShaderProgram&    compute_program) {
+PipelineCache::Pipeline&
+PipelineCache::CreateComputePipeline(const ShaderComputeInputInfo& input_info,
+                                     const ShaderProgram&          compute_program) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
 	EXIT_IF(!compute_program);
 
 	Common::LockGuard lock(m_mutex);
 
-	ComputePipeline p {};
-	p.cs_shader_id = compute_program.id;
-
-	ComputePipelineKey key {};
-	key.cs_shader_id = p.cs_shader_id;
-
-	if (auto iter = m_compute_pipelines.find(key); iter != m_compute_pipelines.end()) {
+	if (auto iter = m_compute_pipelines.find(compute_program.id);
+	    iter != m_compute_pipelines.end()) {
 		return *iter->second;
 	}
 
@@ -807,13 +821,13 @@ PipelineCache::CreateComputePipeline(ShaderComputeInputInfo& input_info,
 		ShaderDbgDumpInputInfo(input_info);
 	}
 
-	auto cached = std::make_unique<ComputePipeline>(p);
+	auto cached = std::make_unique<Pipeline>();
 	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
 
-	auto [iter, inserted] = m_compute_pipelines.emplace(std::move(key), std::move(cached));
+	auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(cached));
 	EXIT_IF(!inserted);
 
 	return *iter->second;

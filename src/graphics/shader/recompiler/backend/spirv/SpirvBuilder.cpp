@@ -1,6 +1,6 @@
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 
-#include "common/debug.h"
+#include "common/assert.h"
 
 #include <algorithm>
 #include <cstring>
@@ -30,6 +30,10 @@ Builder::Builder(uint32_t version): m_version(version) {
 
 uint32_t Builder::AllocateId() {
 	return m_next_id++;
+}
+
+void Builder::RequireVersion(uint32_t version) {
+	m_version = std::max(m_version, version);
 }
 
 void Builder::RequireCapability(uint32_t capability) {

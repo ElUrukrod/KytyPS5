@@ -155,6 +155,18 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block,
 				return;
 			}
 			const auto condition = BranchCondition(ctx, info);
+
+			if (!term.loop_header && term.merge_block == UINT32_MAX) {
+				const uint32_t dummy_merge = ctx.state.builder.AllocateId();
+				ctx.state.builder.AddFunction({OpSelectionMerge, dummy_merge, SelectionControlNone});
+				ctx.state.builder.AddFunction({OpBranchConditional, condition, ctx.Label(true_block), ctx.Label(false_block)});
+
+				// Define the unreachable dummy merge block
+				ctx.state.builder.AddFunction({OpLabel, dummy_merge});
+				EmitReturn(ctx);
+				return;
+			}
+
 			emit_merge();
 			ctx.state.builder.AddFunction(
 			    {OpBranchConditional, condition, ctx.Label(true_block), ctx.Label(false_block)});
